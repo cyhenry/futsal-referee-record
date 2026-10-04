@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <meta
+    name="description"
+    content="Offline-first futsal referee match record and timing tool"
+  >
+
+  <title>Futsal Referee Timer</title>
+
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <header class="app-header">
+    <div>
+      <h1>Futsal Referee Timer</h1>
+      <p id="match-status" class="status-line">Pre-match setup</p>
+    </div>
+
+    <button id="new-match-button" class="button button-secondary">
+      New Match
+    </button>
+  </header>
+
+  <main>
+    <!-- PRE-MATCH SETUP -->
+    <section id="setup-screen" class="screen">
+      <div class="card">
+        <h2>Pre-match setup</h2>
+
+        <p class="help-text">
+          Team colours are compulsory. Team names are optional. All timing values are editable.
+        </p>
+
+        <form id="setup-form">
+          <div class="form-grid">
+            <fieldset>
+              <legend>Home team</legend>
+
+              <label>
+                Team name
+                <input
+                  id="home-name"
+                  type="text"
+                  maxlength="30"
+                  placeholder="Home"
+                >
+              </label>
+
+              <label>
+                Shirt colour
+                <input
+                  id="home-colour"
+                  type="color"
+                  value="#0ea5e9"
+                  required
+                >
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Away team</legend>
+
+              <label>
+                Team name
+                <input
+                  id="away-name"
+                  type="text"
+                  maxlength="30"
+                  placeholder="Away"
+                >
+              </label>
+
+              <label>
+                Shirt colour
+                <input
+                  id="away-colour"
+                  type="color"
+                  value="#ef4444"
+                  required
+                >
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Match timings</legend>
+
+              <label>
+                Length of each regular half
+                <input
+                  id="half-minutes"
+                  type="number"
+                  min="1"
+                  max="60"
+                  value="20"
+                  required
+                >
+                <span class="field-unit">minutes</span>
+              </label>
+
+              <label>
+                Half-time break
+                <input
+                  id="break-minutes"
+                  type="number"
+                  min="0"
+                  max="30"
+                  value="5"
+                  required
+                >
+                <span class="field-unit">minutes</span>
+              </label>
+
+              <label>
+                Team time-out
+                <input
+                  id="timeout-minutes"
+                  type="number"
+                  min="0.25"
+                  max="5"
+                  step="0.25"
+                  value="1"
+                  required
+                >
+                <span class="field-unit">minutes</span>
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Match rules</legend>
+
+              <label>
+                Accumulated fouls leading to 10m free kick
+                <input
+                  id="foul-threshold"
+                  type="number"
+                  min="2"
+                  max="12"
+                  value="6"
+                  required
+                >
+              </label>
+
+              <label class="checkbox-label">
+                <input id="extra-time-enabled" type="checkbox">
+                Extra time may be played
+              </label>
+
+              <label>
+                Extra-time half length
+                <input
+                  id="extra-time-minutes"
+                  type="number"
+                  min="1"
+                  max="20"
+                  value="5"
+                  required
+                >
+                <span class="field-unit">minutes</span>
+              </label>
+            </fieldset>
+
+            <fieldset>
+              <legend>Kick-off</legend>
+
+              <p class="help-text">
+                The second-half kick-off automatically becomes the other team.
+              </p>
+
+              <div class="choice-row">
+                <label class="radio-label">
+                  <input
+                    type="radio"
+                    name="first-kickoff"
+                    value="home"
+                    checked
+                  >
+                  Home
+                </label>
+
+                <label class="radio-label">
+                  <input
+                    type="radio"
+                    name="first-kickoff"
+                    value="away"
+                  >
+                  Away
+                </label>
+              </div>
+            </fieldset>
+          </div>
+
+          <button class="button button-primary button-large" type="submit">
+            Create Match
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- LIVE MATCH SCREEN -->
+    <section id="match-screen" class="screen hidden">
+      <div class="match-layout">
+
+        <!-- HOME TEAM -->
+        <section id="home-panel" class="team-panel">
+          <h2 id="home-team-title">Home</h2>
+
+          <!-- SCORE -->
+          <div class="score-box">
+            <span>Score</span>
+            <strong id="home-score">0</strong>
+
+            <button
+              id="home-goal-button"
+              class="button button-success button-full"
+            >
+              + Goal
+            </button>
+          </div>
+
+          <div class="incident-history">
+            <h4>Goals</h4>
+            <ol id="home-goal-history" class="mini-history"></ol>
+          </div>
+
+          <!-- TIME-OUT -->
+          <div class="control-box">
+            <h3>Time-out</h3>
+
+            <button
+              id="home-timeout-button"
+              class="button button-light button-full"
+            >
+              Start Time-out
+            </button>
+
+            <div id="home-timeout-display" class="small-timer hidden">
+              <div id="home-timeout-time">1:00</div>
+              <div id="home-timeout-message" class="presignal"></div>
+            </div>
+          </div>
+
+          <!-- ACCUMULATED FOULS -->
+          <div class="foul-box">
+            <div class="foul-heading">
+              <span>Accumulated fouls</span>
+              <strong id="home-foul-total">0</strong>
+            </div>
+
+            <button
+              id="home-foul-add"
+              class="button button-light button-full"
+            >
+              +1 foul
+            </button>
+
+            <div
+              id="home-foul-lights"
+              class="foul-lights"
+              aria-label="Home accumulated foul indicators"
+            ></div>
+          </div>
+
+          <div class="incident-history">
+            <h4>Foul history</h4>
+            <ol id="home-foul-history" class="mini-history"></ol>
+          </div>
+
+          <!-- YELLOW CARDS -->
+          <div class="team-summary">
+            <span>Yellow Cards</span>
+            <strong id="home-yellow-card-total">0</strong>
+          </div>
+
+          <div class="control-box">
+            <button
+              id="home-yellow-button"
+              class="button button-warning button-full"
+            >
+              Yellow Card
+            </button>
+          </div>
+
+          <div class="incident-history">
+            <h4>Yellow-card history</h4>
+            <ol id="home-yellow-history" class="mini-history"></ol>
+          </div>
+
+          <!-- RED CARDS -->
+          <div class="team-summary">
+            <span>Red Cards Shown</span>
+            <strong id="home-red-card-total">0</strong>
+          </div>
+
+          <div class="red-card-grid">
+            <article class="red-card-box">
+              <h3>Reduction Slot 1</h3>
+
+              <button
+                id="home-red-1-card-button"
+                class="button button-danger button-full"
+              >
+                Red Card
+              </button>
+
+              <div id="home-red-1-display" class="small-timer hidden">
+                <div id="home-red-1-state">Waiting to restart</div>
+                <div id="home-red-1-time">2:00</div>
+
+                <button
+                  id="home-red-1-start-button"
+                  class="button button-success button-full"
+                >
+                  Start 2:00 / Resume Match
+                </button>
+
+                <button
+                  id="home-red-1-goal"
+                  class="button button-warning button-full hidden"
+                >
+                  Opponent Goal
+                </button>
+
+                <button
+                  id="home-red-1-clear-button"
+                  class="button button-secondary button-full hidden"
+                >
+                  Clear Slot for Reuse
+                </button>
+              </div>
+            </article>
+
+            <article class="red-card-box">
+              <h3>Reduction Slot 2</h3>
+
+              <button
+                id="home-red-2-card-button"
+                class="button button-danger button-full"
+              >
+                Red Card
+              </button>
+
+              <div id="home-red-2-display" class="small-timer hidden">
+                <div id="home-red-2-state">Waiting to restart</div>
+                <div id="home-red-2-time">2:00</div>
+
+                <button
+                  id="home-red-2-start-button"
+                  class="button button-success button-full"
+                >
+                  Start 2:00 / Resume Match
+                </button>
+
+                <button
+                  id="home-red-2-goal"
+                  class="button button-warning button-full hidden"
+                >
+                  Opponent Goal
+                </button>
+
+                <button
+                  id="home-red-2-clear-button"
+                  class="button button-secondary button-full hidden"
+                >
+                  Clear Slot for Reuse
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div class="incident-history">
+            <h4>Red-card history</h4>
+            <ol id="home-red-history" class="mini-history"></ol>
+          </div>
+        </section>
+
+        <!-- CENTRAL MATCH CONTROLS -->
+        <section class="centre-panel">
+          <div class="period-box">
+            <span>Current period</span>
+            <strong id="period-label">First Half</strong>
+          </div>
+
+          <div id="match-timer" class="main-timer">20:00</div>
+
+          <div class="timer-buttons">
+            <button id="start-button" class="button button-success">
+              Start
+            </button>
+
+            <button
+              id="pause-button"
+              class="button button-secondary"
+              disabled
+            >
+              Pause
+            </button>
+
+            <button id="reset-button" class="button button-danger">
+              Reset Half
+            </button>
+          </div>
+
+          <div class="kickoff-box">
+            <span id="kickoff-label">First-half kick-off</span>
+            <strong id="kickoff-team">Home</strong>
+          </div>
+
+          <button
+            id="undo-button"
+            class="button button-secondary button-full"
+            disabled
+          >
+            Undo previous step
+          </button>
+
+          <button
+            id="proceed-button"
+            class="button button-primary button-full"
+          >
+            Proceed to Half-time
+          </button>
+
+          <button
+            id="export-button"
+            class="button button-outline button-full"
+          >
+            Export Match Log (CSV)
+          </button>
+
+          <div class="event-box">
+            <h3>Recent events</h3>
+            <ol id="event-list" class="event-list"></ol>
+          </div>
+        </section>
+
+        <!-- AWAY TEAM -->
+        <section id="away-panel" class="team-panel">
+          <h2 id="away-team-title">Away</h2>
+
+          <!-- SCORE -->
+          <div class="score-box">
+            <span>Score</span>
+            <strong id="away-score">0</strong>
+
+            <button
+              id="away-goal-button"
+              class="button button-success button-full"
+            >
+              + Goal
+            </button>
+          </div>
+
+          <div class="incident-history">
+            <h4>Goals</h4>
+            <ol id="away-goal-history" class="mini-history"></ol>
+          </div>
+
+          <!-- TIME-OUT -->
+          <div class="control-box">
+            <h3>Time-out</h3>
+
+            <button
+              id="away-timeout-button"
+              class="button button-light button-full"
+            >
+              Start Time-out
+            </button>
+
+            <div id="away-timeout-display" class="small-timer hidden">
+              <div id="away-timeout-time">1:00</div>
+              <div id="away-timeout-message" class="presignal"></div>
+            </div>
+          </div>
+
+          <!-- ACCUMULATED FOULS -->
+          <div class="foul-box">
+            <div class="foul-heading">
+              <span>Accumulated fouls</span>
+              <strong id="away-foul-total">0</strong>
+            </div>
+
+            <button
+              id="away-foul-add"
+              class="button button-light button-full"
+            >
+              +1 foul
+            </button>
+
+            <div
+              id="away-foul-lights"
+              class="foul-lights"
+              aria-label="Away accumulated foul indicators"
+            ></div>
+          </div>
+
+          <div class="incident-history">
+            <h4>Foul history</h4>
+            <ol id="away-foul-history" class="mini-history"></ol>
+          </div>
+
+          <!-- YELLOW CARDS -->
+          <div class="team-summary">
+            <span>Yellow Cards</span>
+            <strong id="away-yellow-card-total">0</strong>
+          </div>
+
+          <div class="control-box">
+            <button
+              id="away-yellow-button"
+              class="button button-warning button-full"
+            >
+              Yellow Card
+            </button>
+          </div>
+
+          <div class="incident-history">
+            <h4>Yellow-card history</h4>
+            <ol id="away-yellow-history" class="mini-history"></ol>
+          </div>
+
+          <!-- RED CARDS -->
+          <div class="team-summary">
+            <span>Red Cards Shown</span>
+            <strong id="away-red-card-total">0</strong>
+          </div>
+
+          <div class="red-card-grid">
+            <article class="red-card-box">
+              <h3>Reduction Slot 1</h3>
+
+              <button
+                id="away-red-1-card-button"
+                class="button button-danger button-full"
+              >
+                Red Card
+              </button>
+
+              <div id="away-red-1-display" class="small-timer hidden">
+                <div id="away-red-1-state">Waiting to restart</div>
+                <div id="away-red-1-time">2:00</div>
+
+                <button
+                  id="away-red-1-start-button"
+                  class="button button-success button-full"
+                >
+                  Start 2:00 / Resume Match
+                </button>
+
+                <button
+                  id="away-red-1-goal"
+                  class="button button-warning button-full hidden"
+                >
+                  Opponent Goal
+                </button>
+
+                <button
+                  id="away-red-1-clear-button"
+                  class="button button-secondary button-full hidden"
+                >
+                  Clear Slot for Reuse
+                </button>
+              </div>
+            </article>
+
+            <article class="red-card-box">
+              <h3>Reduction Slot 2</h3>
+
+              <button
+                id="away-red-2-card-button"
+                class="button button-danger button-full"
+              >
+                Red Card
+              </button>
+
+              <div id="away-red-2-display" class="small-timer hidden">
+                <div id="away-red-2-state">Waiting to restart</div>
+                <div id="away-red-2-time">2:00</div>
+
+                <button
+                  id="away-red-2-start-button"
+                  class="button button-success button-full"
+                >
+                  Start 2:00 / Resume Match
+                </button>
+
+                <button
+                  id="away-red-2-goal"
+                  class="button button-warning button-full hidden"
+                >
+                  Opponent Goal
+                </button>
+
+                <button
+                  id="away-red-2-clear-button"
+                  class="button button-secondary button-full hidden"
+                >
+                  Clear Slot for Reuse
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div class="incident-history">
+            <h4>Red-card history</h4>
+            <ol id="away-red-history" class="mini-history"></ol>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <!-- STANDARD CONFIRMATION DIALOG -->
+  <dialog id="confirm-dialog">
+    <form method="dialog" class="dialog-content">
+      <h2 id="dialog-title">Confirm</h2>
+      <p id="dialog-message"></p>
+
+      <div class="dialog-buttons">
+        <button
+          id="dialog-cancel"
+          value="cancel"
+          class="button button-secondary"
+        >
+          No
+        </button>
+
+        <button
+          id="dialog-confirm"
+          value="confirm"
+          class="button button-primary"
+        >
+          Yes
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- STANDARD ALERT DIALOG -->
+  <dialog id="alert-dialog">
+    <form method="dialog" class="dialog-content">
+      <h2 id="alert-title">Notice</h2>
+      <p id="alert-message"></p>
+
+      <div class="dialog-buttons">
+        <button value="ok" class="button button-primary">
+          OK
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- GOAL DETAILS DIALOG -->
+  <dialog id="goal-dialog">
+    <form method="dialog" class="dialog-content">
+      <h2 id="goal-dialog-title">Goal</h2>
+
+      <label>
+        Scorer's number
+        <input
+          id="goal-scorer-number"
+          type="text"
+          inputmode="numeric"
+          maxlength="3"
+          placeholder="e.g. 10"
+        >
+      </label>
+
+      <label class="checkbox-label">
+        <input id="goal-penalty" type="checkbox">
+        Penalty goal
+      </label>
+
+      <label class="checkbox-label">
+        <input id="goal-10m" type="checkbox">
+        10m free-kick goal
+      </label>
+
+      <label>
+        Note (optional)
+        <input
+          id="goal-note"
+          type="text"
+          maxlength="100"
+          placeholder="Optional note"
+        >
+      </label>
+
+      <div class="dialog-buttons">
+        <button
+          id="goal-cancel"
+          value="cancel"
+          class="button button-secondary"
+        >
+          Cancel
+        </button>
+
+        <button
+          id="goal-confirm"
+          value="confirm"
+          class="button button-success"
+        >
+          Record Goal
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- YELLOW CARD DETAILS DIALOG -->
+  <dialog id="yellow-dialog">
+    <form method="dialog" class="dialog-content">
+      <h2 id="yellow-dialog-title">Yellow Card</h2>
+
+      <label>
+        Player's number
+        <input
+          id="yellow-player-number"
+          type="text"
+          inputmode="numeric"
+          maxlength="3"
+          placeholder="e.g. 7"
+          required
+        >
+      </label>
+
+      <label>
+        Note / offence (optional)
+        <input
+          id="yellow-note"
+          type="text"
+          maxlength="100"
+          placeholder="Optional note"
+        >
+      </label>
+
+      <div class="dialog-buttons">
+        <button
+          id="yellow-cancel"
+          value="cancel"
+          class="button button-secondary"
+        >
+          Cancel
+        </button>
+
+        <button
+          id="yellow-confirm"
+          value="confirm"
+          class="button button-warning"
+        >
+          Record Yellow Card
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- RED CARD DETAILS DIALOG -->
+  <dialog id="red-dialog">
+    <form method="dialog" class="dialog-content">
+      <h2 id="red-dialog-title">Red Card</h2>
+
+      <label>
+        Player / official number or identifier
+        <input
+          id="red-person-id"
+          type="text"
+          maxlength="20"
+          placeholder="e.g. 8, GK, Coach"
+        >
+      </label>
+
+      <label>
+        Recipient
+        <select id="red-recipient-type">
+          <option value="player">
+            Player on court — two-minute reduction
+          </option>
+          <option value="substitute">
+            Substitute — record only
+          </option>
+          <option value="official">
+            Team official — record only
+          </option>
+          <option value="other">
+            Other / unknown — record only
+          </option>
+        </select>
+      </label>
+
+      <label>
+        Reduction slot, if applicable
+        <select id="red-slot-choice">
+          <option value="0">Reduction Slot 1</option>
+          <option value="1">Reduction Slot 2</option>
+        </select>
+      </label>
+
+      <label>
+        Note / offence (optional)
+        <input
+          id="red-note"
+          type="text"
+          maxlength="100"
+          placeholder="Optional note"
+        >
+      </label>
+
+      <p id="red-dialog-hint" class="help-text">
+        A two-minute timer is created only for a player on the court.
+      </p>
+
+      <div class="dialog-buttons">
+        <button
+          id="red-cancel"
+          value="cancel"
+          class="button button-secondary"
+        >
+          Cancel
+        </button>
+
+        <button
+          id="red-confirm"
+          value="confirm"
+          class="button button-danger"
+        >
+          Record Red Card
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

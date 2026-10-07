@@ -1518,19 +1518,55 @@ function recordGoal(scoringSide, details = {}) {
 }
 
 function confirmGoalDialog() {
-  const selectedSide = elements.goalConfirm.dataset.scoringSide;
+  const scoringSide = elements.goalConfirm.dataset.scoringSide;
   const type = elements.goalType.value;
-  const ownGoalSide = elements.goalConfirm.dataset.ownGoalSide || "";
+  const scorerNumber = elements.goalScorerNumber.value.trim();
+  const note = elements.goalNote.value.trim();
+  const ownGoalSide = elements.ownGoalTeam.value;
+  const finishOpponentGoalAction =
+    elements.goalConfirm.dataset.afterOpponentGoal === "true";
 
-  if (!selectedSide) return;
+  if (!scoringSide) return;
 
-  let scoringSide = selectedSide;
-  let responsibleSide = ownGoalSide || selectedSide;
-
-  if (type === "ownGoal") {
-    scoringSide = opposite(selectedSide);
-    responsibleSide = selectedSide;
+  if (type === "ownGoal" && !ownGoalSide) {
+    showAlert(
+      "Own-goal team required",
+      "Select the team whose player scored the own goal."
+    );
+    return;
   }
+
+  if (type === "ownGoal" && ownGoalSide === scoringSide) {
+    showAlert(
+      "Check own-goal entry",
+      "The own-goal team must be the opponent of the team receiving the goal."
+    );
+    return;
+  }
+
+  /*
+    Close first. This prevents the re-render from leaving the dialog visible
+    on some browsers, especially an installed Android PWA.
+  */
+  if (elements.goalDialog.open) {
+    elements.goalDialog.close("confirm");
+  }
+
+  recordGoal(scoringSide, {
+    scorerNumber,
+    type,
+    ownGoalSide: type === "ownGoal" ? ownGoalSide : null,
+    note
+  });
+
+  elements.goalConfirm.dataset.scoringSide = "";
+  elements.goalConfirm.dataset.ownGoalSide = "";
+  elements.goalConfirm.dataset.afterOpponentGoal = "";
+
+  if (finishOpponentGoalAction) {
+    completePendingOpponentGoalReduction();
+  }
+}
 
   recordGoal(scoringSide, {
     scorerNumber: elements.goalScorerNumber.value.trim(),
@@ -2431,10 +2467,6 @@ function initialiseEventListeners() {
     });
   });
 
-  elements.goalConfirm.addEventListener("click", (event) => {
-    event.preventDefault();
-    confirmGoalDialog();
-  });
 
   elements.yellowConfirm.addEventListener("click", (event) => {
     event.preventDefault();

@@ -1179,7 +1179,7 @@ function renderReductionSlot(side, index, slot) {
   cardButton.textContent = "Slot Ready After Clear";
 }
 
-function renderFoulLights(container, count) {
+function renderFoulLights(container, count, overflowEl) {
   const threshold = match.settings.foulThreshold;
   const visible = Math.max(threshold, 6);
 
@@ -1200,6 +1200,16 @@ function renderFoulLights(container, count) {
     }
 
     container.appendChild(light);
+  }
+
+  if (overflowEl) {
+    const extra = Math.max(0, count - visible);
+    if (extra > 0) {
+      overflowEl.textContent = `+${extra}`;
+      overflowEl.classList.remove("hidden");
+    } else {
+      overflowEl.classList.add("hidden");
+    }
   }
 }
 
@@ -1528,27 +1538,15 @@ function confirmGoalDialog() {
   const type = elements.goalType.value;
   const scorerNumber = elements.goalScorerNumber.value.trim();
   const note = elements.goalNote.value.trim();
-  const ownGoalSide = elements.ownGoalTeam.value;
   const finishOpponentGoalAction =
     elements.goalConfirm.dataset.afterOpponentGoal === "true";
 
   if (!scoringSide) return;
 
-  if (type === "ownGoal" && !ownGoalSide) {
-    showAlert(
-      "Own-goal team required",
-      "Select the team whose player scored the own goal."
-    );
-    return;
-  }
-
-  if (type === "ownGoal" && ownGoalSide === scoringSide) {
-    showAlert(
-      "Check own-goal entry",
-      "The own-goal team must be the opponent of the team receiving the goal."
-    );
-    return;
-  }
+  // Own goal: the team that receives the goal is scoringSide (the + Goal
+  // button pressed). The player who scored into their own net belongs to
+  // the opposite team.
+  const ownGoalSide = type === "ownGoal" ? opposite(scoringSide) : null;
 
   /*
     Close first. This prevents the re-render from leaving the dialog visible
@@ -1561,7 +1559,7 @@ function confirmGoalDialog() {
   recordGoal(scoringSide, {
     scorerNumber,
     type,
-    ownGoalSide: type === "ownGoal" ? ownGoalSide : null,
+    ownGoalSide,
     note
   });
 
@@ -1570,20 +1568,6 @@ function confirmGoalDialog() {
   elements.goalConfirm.dataset.afterOpponentGoal = "";
 
   if (finishOpponentGoalAction) {
-    completePendingOpponentGoalReduction();
-  }
-}
-
-  recordGoal(scoringSide, {
-    scorerNumber: elements.goalScorerNumber.value.trim(),
-    type,
-    ownGoalSide: type === "ownGoal" ? responsibleSide : null,
-    note: elements.goalNote.value.trim()
-  });
-
-  elements.goalDialog.close("confirm");
-
-  if (elements.goalConfirm.dataset.afterOpponentGoal === "true") {
     completePendingOpponentGoalReduction();
   }
 }
@@ -2473,6 +2457,10 @@ function initialiseEventListeners() {
     });
   });
 
+  elements.goalConfirm.addEventListener("click", (event) => {
+    event.preventDefault();
+    confirmGoalDialog();
+  });
 
   elements.yellowConfirm.addEventListener("click", (event) => {
     event.preventDefault();

@@ -369,12 +369,20 @@ input[type="color"] {
 }
 
 .mini-history {
-  max-height: 128px;
+  height: 5.7rem;
   margin: 0;
   padding-left: 22px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   font-size: 0.82rem;
   line-height: 1.42;
+}
+
+@media (max-width: 620px) {
+  .mini-history {
+    height: 5.9rem;
+  }
 }
 
 .mini-history li {
@@ -720,4 +728,16 @@ dialog::backdrop {
   background: rgba(0, 0, 0, 0.38);
   text-align: center;
   font-size: 0.9rem;
+}
+
+.mini-history li {
+  min-height: 1.42em;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.incident-history h4 {
+  display: flex;
+  align-items: center;
+  min-height: 1.2em;
 }

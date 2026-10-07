@@ -47,10 +47,12 @@ const elements = {
 
   homeFoulTotal: $("#home-foul-total"),
   awayFoulTotal: $("#away-foul-total"),
-  homeFoulLights: $("#home-foul-lights"),
-  awayFoulLights: $("#away-foul-lights"),
-  homeFoulAdd: $("#home-foul-add"),
-  awayFoulAdd: $("#away-foul-add"),
+homeFoulLights: $("#home-foul-lights"),
+awayFoulLights: $("#away-foul-lights"),
+homeFoulOverflow: $("#home-foul-overflow"),
+awayFoulOverflow: $("#away-foul-overflow"),
+homeFoulAdd: $("#home-foul-add"),
+awayFoulAdd: $("#away-foul-add"),
 
   homeYellowCardTotal: $("#home-yellow-card-total"),
   awayYellowCardTotal: $("#away-yellow-card-total"),
@@ -1053,9 +1055,13 @@ function render() {
 function renderTeam(side) {
   const team = match.teams[side];
 
-  const foulTotal = side === "home" ? elements.homeFoulTotal : elements.awayFoulTotal;
-  const foulLights = side === "home" ? elements.homeFoulLights : elements.awayFoulLights;
-  const foulButton = side === "home" ? elements.homeFoulAdd : elements.awayFoulAdd;
+const foulTotal = side === "home" ? elements.homeFoulTotal : elements.awayFoulTotal;
+const foulLights = side === "home" ? elements.homeFoulLights : elements.awayFoulLights;
+const foulOverflow = side === "home"
+  ? elements.homeFoulOverflow
+  : elements.awayFoulOverflow;
+
+const foulButton = side === "home" ? elements.homeFoulAdd : elements.awayFoulAdd;
   const goalButton = side === "home" ? elements.homeGoalButton : elements.awayGoalButton;
   const yellowButton = side === "home" ? elements.homeYellowButton : elements.awayYellowButton;
 
@@ -1064,8 +1070,8 @@ function renderTeam(side) {
   const timeoutTime = side === "home" ? elements.homeTimeoutTime : elements.awayTimeoutTime;
   const timeoutMessage = side === "home" ? elements.homeTimeoutMessage : elements.awayTimeoutMessage;
 
-  foulTotal.textContent = team.foulCount;
-  renderFoulLights(foulLights, team.foulCount);
+foulTotal.textContent = team.foulCount;
+renderFoulLights(foulLights, team.foulCount, foulOverflow);
 
   goalButton.disabled = !canRecordGoalOrFoul();
   foulButton.disabled = !canRecordGoalOrFoul();

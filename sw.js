@@ -1,4 +1,4 @@
-const CACHE_NAME = "futsal-referee-timer-v6";
+const CACHE_NAME = "futsal-referee-timer-v7";
 
 const APP_FILES = [
   "./",

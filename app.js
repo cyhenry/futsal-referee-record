@@ -1,11 +1,14 @@
 "use strict";
 
-const STORAGE_KEY = "futsalRefereeTimer.match.v5";
+const STORAGE_KEY = "futsalRefereeTimer.match.v6";
 const RED_CARD_SECONDS = 120;
 
 let match = null;
 let tickHandle = null;
 let confirmationCallback = null;
+let wakeLockSentinel = null;
+let wakeLockRequested = false;
+let pendingOpponentGoal = null;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -24,6 +27,10 @@ const elements = {
   foulThreshold: $("#foul-threshold"),
   extraTimeEnabled: $("#extra-time-enabled"),
   extraTimeMinutes: $("#extra-time-minutes"),
+  fullTimeBreakMinutes: $("#full-time-break-minutes"),
+  extraTimeBreakMinutes: $("#extra-time-break-minutes"),
+  psoEnabled: $("#pso-enabled"),
+  psoRounds: $("#pso-rounds"),
 
   matchStatus: $("#match-status"),
   newMatchButton: $("#new-match-button"),
@@ -73,7 +80,26 @@ const elements = {
   undoButton: $("#undo-button"),
   proceedButton: $("#proceed-button"),
   exportButton: $("#export-button"),
+  wakeLockButton: $("#wake-lock-button"),
+  wakeLockStatus: $("#wake-lock-status"),
   eventList: $("#event-list"),
+
+  psoPanel: $("#pso-panel"),
+  psoStatus: $("#pso-status"),
+  psoHomeName: $("#pso-home-name"),
+  psoAwayName: $("#pso-away-name"),
+  psoHomeScore: $("#pso-home-score"),
+  psoAwayScore: $("#pso-away-score"),
+  psoHomeKicks: $("#pso-home-kicks"),
+  psoAwayKicks: $("#pso-away-kicks"),
+  psoSetupControls: $("#pso-setup-controls"),
+  psoKickControls: $("#pso-kick-controls"),
+  psoFirstHome: $("#pso-first-home"),
+  psoFirstAway: $("#pso-first-away"),
+  psoNextTeam: $("#pso-next-team"),
+  psoTakerNumber: $("#pso-taker-number"),
+  psoRecordKick: $("#pso-record-kick"),
+  psoSuddenDeath: $("#pso-sudden-death"),
 
   confirmDialog: $("#confirm-dialog"),
   dialogTitle: $("#dialog-title"),
@@ -88,8 +114,7 @@ const elements = {
   goalDialog: $("#goal-dialog"),
   goalDialogTitle: $("#goal-dialog-title"),
   goalScorerNumber: $("#goal-scorer-number"),
-  goalPenalty: $("#goal-penalty"),
-  goalTenMetre: $("#goal-10m"),
+  goalType: $("#goal-type"),
   goalNote: $("#goal-note"),
   goalConfirm: $("#goal-confirm"),
 
@@ -99,14 +124,28 @@ const elements = {
   yellowNote: $("#yellow-note"),
   yellowConfirm: $("#yellow-confirm"),
 
+  secondYellowDialog: $("#second-yellow-dialog"),
+  secondYellowMessage: $("#second-yellow-message"),
+  secondYellowRed: $("#second-yellow-red"),
+
   redDialog: $("#red-dialog"),
   redDialogTitle: $("#red-dialog-title"),
   redPersonId: $("#red-person-id"),
   redRecipientType: $("#red-recipient-type"),
+  redDogsoRow: $("#red-dogso-row"),
+  redDogso: $("#red-dogso"),
   redSlotChoice: $("#red-slot-choice"),
   redNote: $("#red-note"),
   redDialogHint: $("#red-dialog-hint"),
-  redConfirm: $("#red-confirm")
+  redConfirm: $("#red-confirm"),
+
+  opponentGoalDialog: $("#opponent-goal-dialog"),
+  opponentGoalAdd: $("#opponent-goal-add"),
+  opponentGoalRecorded: $("#opponent-goal-recorded"),
+
+  etCoinDialog: $("#et-coin-dialog"),
+  etCoinHome: $("#et-coin-home"),
+  etCoinAway: $("#et-coin-away")
 };
 
 function createTimer(seconds = 0) {
@@ -122,9 +161,10 @@ function createReductionSlot() {
   return {
     status: "available",
     timer: createTimer(RED_CARD_SECONDS),
-    startedAtPeriodTime: null,
+    startedAtPhase: null,
     completedReason: null,
-    dismissalId: null
+    dismissalId: null,
+    source: null
   };
 }
 
@@ -145,6 +185,79 @@ function createTeamData(name, colour, timeoutSeconds) {
   };
 }
 
+function createMatchFromForm() {
+  const firstKickoff = document.querySelector(
+    'input[name="first-kickoff"]:checked'
+  ).value;
+
+  const halfSeconds = secondsFromMinutes(elements.halfMinutes.value);
+  const breakSeconds = secondsFromMinutes(elements.breakMinutes.value);
+  const timeoutSeconds = secondsFromMinutes(elements.timeoutMinutes.value);
+
+  return {
+    version: 6,
+    createdAt: new Date().toISOString(),
+    endedAt: null,
+
+    settings: {
+      halfSeconds,
+      halfTimeBreakSeconds: breakSeconds,
+      timeoutSeconds,
+      foulThreshold: Number(elements.foulThreshold.value),
+
+      extraTimeEnabled: elements.extraTimeEnabled.checked,
+      extraTimeSeconds: secondsFromMinutes(elements.extraTimeMinutes.value),
+      fullTimeBreakSeconds: secondsFromMinutes(elements.fullTimeBreakMinutes.value),
+      extraTimeBreakSeconds: secondsFromMinutes(elements.extraTimeBreakMinutes.value),
+
+      psoEnabled: elements.psoEnabled.checked,
+      psoRounds: Number(elements.psoRounds.value)
+    },
+
+    teams: {
+      home: createTeamData(
+        elements.homeName.value.trim(),
+        elements.homeColour.value,
+        timeoutSeconds
+      ),
+      away: createTeamData(
+        elements.awayName.value.trim(),
+        elements.awayColour.value,
+        timeoutSeconds
+      )
+    },
+
+    period: {
+      phase: "firstHalf",
+      matchTimer: createTimer(halfSeconds),
+      breakTimer: createTimer(0),
+      firstKickoff,
+      secondKickoff: opposite(firstKickoff),
+      extraTimeFirstKickoff: null,
+      activeKickoff: firstKickoff
+    },
+
+    incidents: {
+      goals: [],
+      fouls: [],
+      cards: [],
+      psoKicks: []
+    },
+
+    pso: {
+      active: false,
+      completed: false,
+      firstTeam: null,
+      nextTeam: null,
+      suddenDeath: false,
+      winner: null
+    },
+
+    history: [],
+    events: []
+  };
+}
+
 function teamName(side) {
   const name = match.teams[side].name.trim();
   return name || (side === "home" ? "Home" : "Away");
@@ -154,14 +267,14 @@ function opposite(side) {
   return side === "home" ? "away" : "home";
 }
 
-function deepCopy(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
 function uniqueId() {
   return crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random()}`;
+}
+
+function deepCopy(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function nowMs() {
@@ -176,7 +289,6 @@ function formatSeconds(totalSeconds) {
   const safe = Math.max(0, Math.ceil(totalSeconds));
   const minutes = Math.floor(safe / 60);
   const seconds = safe % 60;
-
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
@@ -184,17 +296,16 @@ function formatClockUp(elapsedSeconds) {
   const safe = Math.max(0, Math.floor(elapsedSeconds));
   const minutes = Math.floor(safe / 60);
   const seconds = safe % 60;
-
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function dateStamp() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-
-  return `${year}${month}${day}`;
+  const date = new Date();
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("");
 }
 
 function safeFileName(text) {
@@ -233,152 +344,128 @@ function contrastingText(hex) {
   return relativeLuminance(hex) > 0.42 ? "#111827" : "#ffffff";
 }
 
-function createMatchFromForm() {
-  const firstKickoff = document.querySelector(
-    'input[name="first-kickoff"]:checked'
-  ).value;
+function isLivePhase() {
+  return [
+    "firstHalf",
+    "secondHalf",
+    "extraTime1",
+    "extraTime2"
+  ].includes(match?.period.phase);
+}
 
-  const secondKickoff = opposite(firstKickoff);
-  const halfSeconds = secondsFromMinutes(elements.halfMinutes.value);
-  const breakSeconds = secondsFromMinutes(elements.breakMinutes.value);
-  const timeoutSeconds = secondsFromMinutes(elements.timeoutMinutes.value);
-  const extraTimeSeconds = secondsFromMinutes(elements.extraTimeMinutes.value);
+function isBreakPhase() {
+  return [
+    "halfTime",
+    "fullTimeBreak",
+    "extraTimeHalfTime"
+  ].includes(match?.period.phase);
+}
 
-  return {
-    version: 5,
-    createdAt: new Date().toISOString(),
-    endedAt: null,
-
-    settings: {
-      halfSeconds,
-      breakSeconds,
-      timeoutSeconds,
-      foulThreshold: Number(elements.foulThreshold.value),
-      extraTimeEnabled: elements.extraTimeEnabled.checked,
-      extraTimeSeconds
-    },
-
-    teams: {
-      home: createTeamData(
-        elements.homeName.value.trim(),
-        elements.homeColour.value,
-        timeoutSeconds
-      ),
-      away: createTeamData(
-        elements.awayName.value.trim(),
-        elements.awayColour.value,
-        timeoutSeconds
-      )
-    },
-
-    period: {
-      phase: "firstHalf",
-      number: 1,
-      matchTimer: createTimer(halfSeconds),
-      breakTimer: createTimer(breakSeconds),
-      firstKickoff,
-      secondKickoff,
-      activeKickoff: firstKickoff
-    },
-
-    incidents: {
-      goals: [],
-      cards: [],
-      fouls: []
-    },
-
-    history: [],
-    events: []
-  };
+function isAfterMatchPhase() {
+  return ["matchOver", "psoSetup", "pso"].includes(match?.period.phase);
 }
 
 function isMatchActive() {
-  return match && match.period.phase !== "matchOver";
+  return match && !["matchOver", "psoSetup", "pso"].includes(match.period.phase);
 }
 
 function isExtraTime() {
-  return match && ["extraTime1", "extraTime2"].includes(match.period.phase);
+  return ["extraTime1", "extraTime2"].includes(match?.period.phase);
 }
 
-function periodName() {
-  if (!match) return "";
+function phaseCode() {
+  const codes = {
+    firstHalf: "1st",
+    halfTime: "HT",
+    secondHalf: "2nd",
+    fullTimeBreak: "FT",
+    extraTime1: "ET1",
+    extraTimeHalfTime: "HTET",
+    extraTime2: "ET2",
+    psoSetup: "PSO",
+    pso: "PSO",
+    matchOver: "AM"
+  };
 
+  return codes[match?.period.phase] || "";
+}
+
+function phaseName() {
   const names = {
     firstHalf: "First Half",
     halfTime: "Half-time",
     secondHalf: "Second Half",
+    fullTimeBreak: "Full-time Break",
     extraTime1: "Extra Time – First Half",
+    extraTimeHalfTime: "Extra-time Half-time",
     extraTime2: "Extra Time – Second Half",
-    matchOver: "Match Over"
+    psoSetup: "Penalty Shoot-out Setup",
+    pso: "Penalty Shoot-out",
+    matchOver: "After Match"
   };
 
-  return names[match.period.phase] || "";
+  return names[match?.period.phase] || "";
 }
 
 function currentKickoffLabel() {
-  if (!match) return "";
+  const phase = match.period.phase;
 
-  if (match.period.phase === "firstHalf") return "First-half kick-off";
-  if (match.period.phase === "secondHalf") return "Second-half kick-off";
-  if (match.period.phase === "extraTime1") return "Extra-time kick-off";
-  if (match.period.phase === "extraTime2") return "Extra-time second-half kick-off";
+  if (phase === "firstHalf") return "First-half kick-off";
+  if (phase === "secondHalf") return "Second-half kick-off";
+  if (phase === "extraTime1") return "Extra-time first-half kick-off";
+  if (phase === "extraTime2") return "Extra-time second-half kick-off";
 
   return "Kick-off";
 }
 
-function currentPeriodElapsedSeconds() {
-  if (
-    !match ||
-    match.period.phase === "halfTime" ||
-    match.period.phase === "matchOver"
-  ) {
-    return 0;
-  }
-
-  const periodLength = isExtraTime()
-    ? match.settings.extraTimeSeconds
-    : match.settings.halfSeconds;
-
-  return periodLength - getLiveSeconds(match.period.matchTimer);
+function periodLengthSeconds() {
+  if (isExtraTime()) return match.settings.extraTimeSeconds;
+  return match.settings.halfSeconds;
 }
 
 function currentPeriodTime() {
-  return formatClockUp(currentPeriodElapsedSeconds());
-}
+  if (!isLivePhase()) return "";
 
-function currentMatchElapsedSeconds() {
-  const phase = match.period.phase;
-  const halfLength = match.settings.halfSeconds;
-  const extraLength = match.settings.extraTimeSeconds;
-  const currentRemaining = getLiveSeconds(match.period.matchTimer);
-
-  if (phase === "firstHalf") {
-    return halfLength - currentRemaining;
-  }
-
-  if (phase === "secondHalf") {
-    return halfLength + (halfLength - currentRemaining);
-  }
-
-  if (phase === "extraTime1") {
-    return (2 * halfLength) + (extraLength - currentRemaining);
-  }
-
-  if (phase === "extraTime2") {
-    return (2 * halfLength) + extraLength + (extraLength - currentRemaining);
-  }
-
-  return 0;
+  const elapsed = periodLengthSeconds() - getLiveSeconds(match.period.matchTimer);
+  return formatClockUp(elapsed);
 }
 
 function currentCumulativeTime() {
-  return formatClockUp(currentMatchElapsedSeconds());
+  if (!isLivePhase()) return "";
+
+  const regular = match.settings.halfSeconds;
+  const extra = match.settings.extraTimeSeconds;
+  const remaining = getLiveSeconds(match.period.matchTimer);
+
+  if (match.period.phase === "firstHalf") {
+    return formatClockUp(regular - remaining);
+  }
+
+  if (match.period.phase === "secondHalf") {
+    return formatClockUp(regular + (regular - remaining));
+  }
+
+  if (match.period.phase === "extraTime1") {
+    return formatClockUp((2 * regular) + (extra - remaining));
+  }
+
+  if (match.period.phase === "extraTime2") {
+    return formatClockUp((2 * regular) + extra + (extra - remaining));
+  }
+
+  return "";
 }
 
 function canUseTimeout() {
-  return isMatchActive() &&
-    !isExtraTime() &&
-    ["firstHalf", "secondHalf"].includes(match.period.phase);
+  return ["firstHalf", "secondHalf"].includes(match?.period.phase);
+}
+
+function canRecordGoalOrFoul() {
+  return isLivePhase();
+}
+
+function canRecordCards() {
+  return Boolean(match) && match.period.phase !== "pso";
 }
 
 function setTimerRunning(timer, running) {
@@ -448,12 +535,34 @@ function resumeActiveReductionTimers() {
   });
 }
 
+function stopReductionsAtPeriodEnd(reason) {
+  ["home", "away"].forEach((side) => {
+    match.teams[side].reductionSlots.forEach((slot) => {
+      if (slot.status === "running" || slot.status === "waiting") {
+        setTimerRunning(slot.timer, false);
+        slot.status = "completed";
+        slot.completedReason = reason;
+      }
+    });
+  });
+}
+
+function activatePendingReductionsForNextPeriod() {
+  ["home", "away"].forEach((side) => {
+    match.teams[side].reductionSlots.forEach((slot) => {
+      if (slot.status === "pendingNextPeriod") {
+        slot.status = "waiting";
+        slot.source = "nextPeriod";
+      }
+    });
+  });
+}
+
 function startOrResumeMainClock() {
   const timer = match.period.matchTimer;
 
   if (
-    isMatchActive() &&
-    match.period.phase !== "halfTime" &&
+    isLivePhase() &&
     timer.remainingSeconds > 0 &&
     !timer.completed
   ) {
@@ -483,22 +592,6 @@ function firstWaitingReductionDescription() {
   return "";
 }
 
-function addEvent(description, save = true) {
-  match.events.push({
-    at: new Date().toISOString(),
-    period: periodName(),
-    periodTime: currentPeriodTime(),
-    cumulativeTime: currentCumulativeTime(),
-    description
-  });
-
-  if (match.events.length > 500) {
-    match.events.shift();
-  }
-
-  if (save) saveMatch();
-}
-
 function snapshot(description) {
   match.history.push({
     description,
@@ -506,13 +599,30 @@ function snapshot(description) {
       teams: match.teams,
       period: match.period,
       incidents: match.incidents,
+      pso: match.pso,
       endedAt: match.endedAt
     })
   });
 
-  if (match.history.length > 80) {
+  if (match.history.length > 100) {
     match.history.shift();
   }
+}
+
+function addEvent(description, save = true) {
+  match.events.push({
+    at: new Date().toISOString(),
+    phase: phaseCode(),
+    periodTime: currentPeriodTime(),
+    cumulativeTime: currentCumulativeTime(),
+    description
+  });
+
+  if (match.events.length > 600) {
+    match.events.shift();
+  }
+
+  if (save) saveMatch();
 }
 
 function saveMatch() {
@@ -543,28 +653,28 @@ function syncAllTimers() {
 
   let changed = false;
 
-  if (match.period.phase === "halfTime") {
+  if (isBreakPhase()) {
     if (refreshTimer(match.period.breakTimer)) {
       changed = true;
 
       if (match.period.breakTimer.completed) {
-        addEvent("Half-time count-down reached 0:00.", false);
+        addEvent(`${phaseName()} count-down reached 0:00.`, false);
 
         showAlert(
-          "Half-time complete",
-          "The half-time break has reached 0:00. Press “Start Second Half” when ready."
+          "Break complete",
+          `${phaseName()} has reached 0:00. Proceed when the teams are ready.`
         );
       }
     }
-  } else if (refreshTimer(match.period.matchTimer)) {
+  } else if (isLivePhase() && refreshTimer(match.period.matchTimer)) {
     changed = true;
 
     if (match.period.matchTimer.completed) {
-      addEvent(`Main match clock reached 0:00 in ${periodName()}.`, false);
+      addEvent(`${phaseName()} match clock reached 0:00.`, false);
 
       showAlert(
         "Period complete",
-        `${periodName()} has reached 0:00.`
+        `${phaseName()} has reached 0:00.`
       );
     }
   }
@@ -576,10 +686,7 @@ function syncAllTimers() {
       changed = true;
 
       if (team.timeoutTimer.completed) {
-        addEvent(
-          `${teamName(side)} time-out completed. Main clock remains stopped.`,
-          false
-        );
+        addEvent(`${teamName(side)} time-out completed. Main clock remains stopped.`, false);
 
         showAlert(
           "Time-out complete",
@@ -605,7 +712,7 @@ function syncAllTimers() {
 
           showAlert(
             "Player may be replaced",
-            `${teamName(side)} Reduction Slot ${index + 1} has reached 0:00. Clear it when you need to reuse it.`
+            `${teamName(side)} Reduction Slot ${index + 1} has reached 0:00. Clear it when ready for reuse.`
           );
         }
       }
@@ -623,10 +730,8 @@ function timerIsRunningAnywhere() {
 
   return ["home", "away"].some((side) => {
     const team = match.teams[side];
-
-    if (team.timeoutTimer.running) return true;
-
-    return team.reductionSlots.some((slot) => slot.timer.running);
+    return team.timeoutTimer.running ||
+      team.reductionSlots.some((slot) => slot.timer.running);
   });
 }
 
@@ -661,45 +766,153 @@ function showConfirm(title, message, onConfirm, onCancel = null) {
 
   elements.dialogTitle.textContent = title;
   elements.dialogMessage.textContent = message;
-
-  if (typeof elements.confirmDialog.showModal === "function") {
-    elements.confirmDialog.showModal();
-    return;
-  }
-
-  if (window.confirm(message)) {
-    onConfirm();
-  } else if (onCancel) {
-    onCancel();
-  }
+  elements.confirmDialog.showModal();
 }
 
 function showAlert(title, message) {
   elements.alertTitle.textContent = title;
   elements.alertMessage.textContent = message;
+  elements.alertDialog.showModal();
+}
 
-  if (typeof elements.alertDialog.showModal === "function") {
-    elements.alertDialog.showModal();
-  } else {
-    window.alert(`${title}\n\n${message}`);
+function showSecondYellowWarning(side, playerNumber) {
+  elements.secondYellowMessage.textContent =
+    `${teamName(side)} player No. ${playerNumber} has received a second yellow card and must be sent off.`;
+
+  elements.secondYellowRed.dataset.side = side;
+  elements.secondYellowRed.dataset.playerNumber = playerNumber;
+
+  elements.secondYellowDialog.showModal();
+}
+
+function updateWakeLockUi(message = null, type = "") {
+  const supported = "wakeLock" in navigator;
+
+  elements.wakeLockButton.classList.remove("active");
+  elements.wakeLockStatus.classList.remove("active", "warning");
+
+  if (!supported) {
+    elements.wakeLockButton.disabled = true;
+    elements.wakeLockButton.textContent = "Screen Lock Unavailable";
+    elements.wakeLockStatus.textContent =
+      "This browser does not support keeping the screen awake.";
+    elements.wakeLockStatus.classList.add("warning");
+    return;
+  }
+
+  if (wakeLockSentinel && !wakeLockSentinel.released) {
+    elements.wakeLockButton.disabled = false;
+    elements.wakeLockButton.textContent = "Screen On ✓";
+    elements.wakeLockButton.setAttribute("aria-pressed", "true");
+    elements.wakeLockButton.classList.add("active");
+    elements.wakeLockStatus.textContent =
+      message || "Screen wake lock active while app remains visible.";
+    elements.wakeLockStatus.classList.add("active");
+    return;
+  }
+
+  elements.wakeLockButton.disabled = false;
+  elements.wakeLockButton.textContent = "Keep Screen On";
+  elements.wakeLockButton.setAttribute("aria-pressed", "false");
+  elements.wakeLockStatus.textContent = message || "Screen may sleep normally.";
+
+  if (type === "warning") {
+    elements.wakeLockStatus.classList.add("warning");
   }
 }
 
-function openGoalDialog(side) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator)) {
+    updateWakeLockUi("This browser does not support keeping the screen awake.", "warning");
+    return false;
+  }
 
-  elements.goalDialogTitle.textContent = `Goal — ${teamName(side)}`;
-  elements.goalScorerNumber.value = "";
-  elements.goalPenalty.checked = false;
-  elements.goalTenMetre.checked = false;
-  elements.goalNote.value = "";
-  elements.goalConfirm.dataset.side = side;
+  if (document.visibilityState !== "visible") {
+    updateWakeLockUi("Return to the app to activate screen lock.", "warning");
+    return false;
+  }
+
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request("screen");
+
+    wakeLockSentinel.addEventListener("release", () => {
+      wakeLockSentinel = null;
+
+      if (wakeLockRequested && match && document.visibilityState === "visible") {
+        updateWakeLockUi("Screen lock was released. Trying again when possible.", "warning");
+      } else {
+        updateWakeLockUi();
+      }
+    });
+
+    updateWakeLockUi();
+    return true;
+  } catch (error) {
+    wakeLockSentinel = null;
+    updateWakeLockUi(
+      "Could not keep screen on. Check battery saver or browser permissions.",
+      "warning"
+    );
+    console.warn("Wake lock request failed:", error);
+    return false;
+  }
+}
+
+async function releaseWakeLock() {
+  wakeLockRequested = false;
+
+  if (!wakeLockSentinel) {
+    updateWakeLockUi();
+    return;
+  }
+
+  try {
+    await wakeLockSentinel.release();
+  } catch (error) {
+    console.warn("Wake lock release failed:", error);
+  } finally {
+    wakeLockSentinel = null;
+    updateWakeLockUi();
+  }
+}
+
+async function toggleWakeLock() {
+  if (wakeLockSentinel && !wakeLockSentinel.released) {
+    await releaseWakeLock();
+    return;
+  }
+
+  wakeLockRequested = true;
+  await requestWakeLock();
+}
+
+async function restoreWakeLockIfNeeded() {
+  if (
+    wakeLockRequested &&
+    document.visibilityState === "visible" &&
+    (!wakeLockSentinel || wakeLockSentinel.released)
+  ) {
+    await requestWakeLock();
+  }
+}
+
+function openGoalDialog(scoringSide, options = {}) {
+  if (!canRecordGoalOrFoul()) return;
+
+  elements.goalDialogTitle.textContent = `Goal — ${teamName(scoringSide)}`;
+  elements.goalScorerNumber.value = options.scorerNumber || "";
+  elements.goalType.value = options.goalType || "openPlay";
+  elements.goalNote.value = options.note || "";
+
+  elements.goalConfirm.dataset.scoringSide = scoringSide;
+  elements.goalConfirm.dataset.ownGoalSide = options.ownGoalSide || "";
+  elements.goalConfirm.dataset.afterOpponentGoal = options.afterOpponentGoal ? "true" : "";
 
   elements.goalDialog.showModal();
 }
 
 function openYellowDialog(side) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!canRecordCards()) return;
 
   elements.yellowDialogTitle.textContent = `Yellow Card — ${teamName(side)}`;
   elements.yellowPlayerNumber.value = "";
@@ -709,14 +922,15 @@ function openYellowDialog(side) {
   elements.yellowDialog.showModal();
 }
 
-function openRedDialog(side, suggestedSlot) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+function openRedDialog(side, suggestedSlot = 0, options = {}) {
+  if (!canRecordCards()) return;
 
   elements.redDialogTitle.textContent = `Red Card — ${teamName(side)}`;
-  elements.redPersonId.value = "";
-  elements.redRecipientType.value = "player";
+  elements.redPersonId.value = options.personId || "";
+  elements.redRecipientType.value = options.recipientType || "player";
+  elements.redDogso.checked = Boolean(options.dogso);
   elements.redSlotChoice.value = String(suggestedSlot);
-  elements.redNote.value = "";
+  elements.redNote.value = options.note || "";
   elements.redConfirm.dataset.side = side;
 
   updateRedDialogFields();
@@ -724,13 +938,39 @@ function openRedDialog(side, suggestedSlot) {
 }
 
 function updateRedDialogFields() {
-  const playerOnCourt = elements.redRecipientType.value === "player";
+  const type = elements.redRecipientType.value;
+  const dogsoEligible = type === "substitute" || type === "official";
+  const requiresReduction = type === "player" || (dogsoEligible && elements.redDogso.checked);
 
-  elements.redSlotChoice.disabled = !playerOnCourt;
+  elements.redDogsoRow.classList.toggle("hidden", !dogsoEligible);
 
-  elements.redDialogHint.textContent = playerOnCourt
-    ? "A player on the court has been sent off. The match clock will stop and a two-minute reduction will wait until you start it."
-    : "This red card is recorded only. No two-minute numerical-reduction timer will be created.";
+  if (!dogsoEligible) {
+    elements.redDogso.checked = false;
+  }
+
+  elements.redSlotChoice.disabled = !requiresReduction;
+
+  if (match?.period.phase === "matchOver") {
+    elements.redSlotChoice.disabled = true;
+    elements.redDialogHint.textContent =
+      "After match: the red card is recorded only. No numerical reduction can begin.";
+    return;
+  }
+
+  if (requiresReduction && isBreakPhase()) {
+    elements.redDialogHint.textContent =
+      "A reduction applies. It will be pending at 2:00 and becomes available to start when the next playing period begins.";
+    return;
+  }
+
+  if (requiresReduction && isLivePhase()) {
+    elements.redDialogHint.textContent =
+      "The main clock will stop. The two-minute reduction waits until you press Start 2:00 / Resume Match.";
+    return;
+  }
+
+  elements.redDialogHint.textContent =
+    "This red card is record-only. No two-minute numerical reduction applies.";
 }
 
 function render() {
@@ -762,34 +1002,45 @@ function render() {
   elements.homeRedCardTotal.textContent = match.teams.home.redCardsShown;
   elements.awayRedCardTotal.textContent = match.teams.away.redCardsShown;
 
-  elements.periodLabel.textContent = periodName();
+  elements.periodLabel.textContent = phaseName();
 
-  if (match.period.phase === "halfTime") {
-    const remainingBreak = getLiveSeconds(match.period.breakTimer);
-
-    elements.matchTimer.textContent = formatSeconds(remainingBreak);
-    elements.matchTimer.classList.toggle("expired", remainingBreak === 0);
+  if (isBreakPhase()) {
+    const remaining = getLiveSeconds(match.period.breakTimer);
+    elements.matchTimer.textContent = formatSeconds(remaining);
+    elements.matchTimer.classList.toggle("expired", remaining === 0);
 
     elements.matchStatus.textContent =
-      `Half-time — ${formatSeconds(remainingBreak)} remaining — ` +
+      `${phaseCode()} — ${formatSeconds(remaining)} remaining — ` +
       `${teamName("home")} ${match.teams.home.score}–${match.teams.away.score} ${teamName("away")}`;
+  } else if (isLivePhase()) {
+    const remaining = getLiveSeconds(match.period.matchTimer);
+    elements.matchTimer.textContent = formatSeconds(remaining);
+    elements.matchTimer.classList.toggle("expired", remaining === 0);
+
+    elements.matchStatus.textContent =
+      `${phaseCode()} — ${formatSeconds(remaining)} — ` +
+      `${teamName("home")} ${match.teams.home.score}–${match.teams.away.score} ${teamName("away")}`;
+  } else if (["psoSetup", "pso"].includes(match.period.phase)) {
+    elements.matchTimer.textContent = "PSO";
+    elements.matchTimer.classList.remove("expired");
+    elements.matchStatus.textContent =
+      `PSO — ${teamName("home")} ${match.teams.home.score}–${match.teams.away.score} ${teamName("away")}`;
   } else {
-    const remainingMatch = getLiveSeconds(match.period.matchTimer);
-
-    elements.matchTimer.textContent = formatSeconds(remainingMatch);
-    elements.matchTimer.classList.toggle("expired", remainingMatch === 0);
-
+    elements.matchTimer.textContent = "FT";
+    elements.matchTimer.classList.remove("expired");
     elements.matchStatus.textContent =
-      `${periodName()} — ${formatSeconds(remainingMatch)} — ` +
-      `${teamName("home")} ${match.teams.home.score}–${match.teams.away.score} ${teamName("away")}`;
+      `After Match — ${teamName("home")} ${match.teams.home.score}–${match.teams.away.score} ${teamName("away")}`;
   }
 
   elements.kickoffLabel.textContent = currentKickoffLabel();
-  elements.kickoffTeam.textContent = teamName(match.period.activeKickoff);
+  elements.kickoffTeam.textContent = isLivePhase()
+    ? teamName(match.period.activeKickoff)
+    : "—";
 
   renderTeam("home");
   renderTeam("away");
   renderCentreControls();
+  renderPso();
   renderEventList();
 
   if (timerIsRunningAnywhere()) {
@@ -813,16 +1064,12 @@ function renderTeam(side) {
   const timeoutTime = side === "home" ? elements.homeTimeoutTime : elements.awayTimeoutTime;
   const timeoutMessage = side === "home" ? elements.homeTimeoutMessage : elements.awayTimeoutMessage;
 
-  const normalMatchOperation =
-    isMatchActive() &&
-    match.period.phase !== "halfTime";
-
   foulTotal.textContent = team.foulCount;
   renderFoulLights(foulLights, team.foulCount);
 
-  foulButton.disabled = !normalMatchOperation;
-  goalButton.disabled = !normalMatchOperation;
-  yellowButton.disabled = !normalMatchOperation;
+  goalButton.disabled = !canRecordGoalOrFoul();
+  foulButton.disabled = !canRecordGoalOrFoul();
+  yellowButton.disabled = !canRecordCards();
 
   timeoutButton.disabled =
     !canUseTimeout() ||
@@ -835,10 +1082,7 @@ function renderTeam(side) {
     const remaining = getLiveSeconds(team.timeoutTimer);
     timeoutTime.textContent = formatSeconds(remaining);
 
-    const preSignal =
-      team.timeoutTimer.running &&
-      remaining > 0 &&
-      remaining <= 15;
+    const preSignal = team.timeoutTimer.running && remaining > 0 && remaining <= 15;
 
     timeoutMessage.textContent =
       team.timeoutTimer.completed
@@ -856,12 +1100,11 @@ function renderTeam(side) {
     renderReductionSlot(side, index, slot);
   });
 
-  renderTeamIncidentHistories(side);
+  renderTeamHistories(side);
 }
 
 function renderReductionSlot(side, index, slot) {
   const number = index + 1;
-
   const cardButton = $(`#${side}-red-${number}-card-button`);
   const display = $(`#${side}-red-${number}-display`);
   const state = $(`#${side}-red-${number}-state`);
@@ -870,11 +1113,7 @@ function renderReductionSlot(side, index, slot) {
   const goalButton = $(`#${side}-red-${number}-goal`);
   const clearButton = $(`#${side}-red-${number}-clear-button`);
 
-  const matchUnavailable =
-    !isMatchActive() ||
-    match.period.phase === "halfTime";
-
-  cardButton.disabled = matchUnavailable || slot.status !== "available";
+  cardButton.disabled = !canRecordCards() || slot.status !== "available";
 
   if (slot.status === "available") {
     display.classList.add("hidden");
@@ -886,14 +1125,24 @@ function renderReductionSlot(side, index, slot) {
   time.textContent = formatSeconds(getLiveSeconds(slot.timer));
   state.className = "reduction-state";
 
+  if (slot.status === "pendingNextPeriod") {
+    state.textContent = "Pending next playing period";
+    state.classList.add("pending");
+
+    startButton.classList.add("hidden");
+    goalButton.classList.add("hidden");
+    clearButton.classList.add("hidden");
+
+    cardButton.textContent = "Red Card Recorded";
+    return;
+  }
+
   if (slot.status === "waiting") {
-    state.textContent = "Red card recorded — main clock stopped";
+    state.textContent = "Waiting — press Start 2:00 / Resume Match";
     state.classList.add("waiting");
 
     startButton.classList.remove("hidden");
-    startButton.disabled = matchUnavailable;
-    startButton.textContent = "Start 2:00 / Resume Match";
-
+    startButton.disabled = !isLivePhase();
     goalButton.classList.add("hidden");
     clearButton.classList.add("hidden");
 
@@ -918,27 +1167,26 @@ function renderReductionSlot(side, index, slot) {
 
   startButton.classList.add("hidden");
   goalButton.classList.add("hidden");
-
   clearButton.classList.remove("hidden");
-  clearButton.disabled = matchUnavailable;
+  clearButton.disabled = !canRecordCards();
 
   cardButton.textContent = "Slot Ready After Clear";
 }
 
 function renderFoulLights(container, count) {
   const threshold = match.settings.foulThreshold;
-  const visibleLights = Math.max(threshold, 6);
+  const visible = Math.max(threshold, 6);
 
   container.innerHTML = "";
 
-  for (let position = 1; position <= visibleLights; position += 1) {
+  for (let number = 1; number <= visible; number += 1) {
     const light = document.createElement("span");
     light.className = "foul-light";
 
-    if (position <= count) {
-      if (position === threshold) {
+    if (number <= count) {
+      if (number === threshold) {
         light.classList.add("active-threshold");
-      } else if (position === threshold - 1) {
+      } else if (number === threshold - 1) {
         light.classList.add("active-warning");
       } else {
         light.classList.add("active-normal");
@@ -960,110 +1208,102 @@ function renderMiniHistory(container, entries, formatter) {
     return;
   }
 
-  [...entries]
-    .reverse()
-    .forEach((entry) => {
-      const li = document.createElement("li");
-      const formatted = formatter(entry);
+  [...entries].reverse().forEach((entry) => {
+    const li = document.createElement("li");
+    const output = formatter(entry);
 
-      li.textContent = formatted.text;
+    li.textContent = output.text;
 
-      if (formatted.className) {
-        li.classList.add(formatted.className);
-      }
+    if (output.className) {
+      li.classList.add(output.className);
+    }
 
-      container.appendChild(li);
-    });
+    container.appendChild(li);
+  });
 }
 
-function renderTeamIncidentHistories(side) {
-  const goalHistory = $(`#${side}-goal-history`);
-  const yellowHistory = $(`#${side}-yellow-history`);
-  const redHistory = $(`#${side}-red-history`);
-  const foulHistory = $(`#${side}-foul-history`);
-
-  const goals = match.incidents.goals.filter((goal) => goal.side === side);
+function renderTeamHistories(side) {
+  const goals = match.incidents.goals.filter((entry) => entry.displaySide === side);
+  const fouls = match.incidents.fouls.filter((entry) => entry.side === side);
   const yellows = match.incidents.cards.filter(
-    (card) => card.side === side && card.type === "YC"
+    (entry) => entry.side === side && entry.type === "YC"
   );
   const reds = match.incidents.cards.filter(
-    (card) => card.side === side && card.type === "RC"
+    (entry) => entry.side === side && entry.type === "RC"
   );
-  const fouls = match.incidents.fouls.filter((foul) => foul.side === side);
 
-  renderMiniHistory(goalHistory, goals, (goal) => {
-    const type = goal.tenMetre
-      ? "10m"
-      : goal.penalty
-        ? "Penalty"
-        : "Goal";
+  renderMiniHistory($(`#${side}-goal-history`), goals, (goal) => {
+    const typeMap = {
+      openPlay: "Goal",
+      penalty: "Penalty",
+      tenMetre: "10m",
+      ownGoal: `OG No. ${goal.scorerNumber || "?"} (${teamName(goal.ownGoalSide)})`
+    };
 
-    const scorer = goal.scorerNumber
-      ? ` No. ${goal.scorerNumber}`
-      : "";
+    const scorer = goal.type === "ownGoal"
+      ? ""
+      : goal.scorerNumber
+        ? ` No. ${goal.scorerNumber}`
+        : "";
 
     return {
-      text: `${goal.periodTime} — ${type}${scorer}`
+      text: `${goal.phase} ${goal.periodTime ? `${goal.periodTime} — ` : "— "}${typeMap[goal.type]}${scorer}`
     };
   });
 
-  renderMiniHistory(yellowHistory, yellows, (card) => {
-    const player = card.playerNumber
-      ? `No. ${card.playerNumber}`
-      : "Player not entered";
-
-    const yellowCount = card.playerNumber
-      ? match.incidents.cards.filter((other) => (
-        other.side === side &&
-        other.type === "YC" &&
-        String(other.playerNumber).trim() === String(card.playerNumber).trim()
-      )).length
-      : 1;
-
-    return {
-      text: `${card.periodTime} — ${player}${yellowCount >= 2 ? " — 2nd YC" : ""}`,
-      className: yellowCount >= 2 ? "warning-entry" : ""
-    };
-  });
-
-  renderMiniHistory(redHistory, reds, (card) => {
-    const recipientLabels = {
-      player: "Player",
-      substitute: "Substitute",
-      official: "Official",
-      other: "Other"
-    };
-
-    const recipient = recipientLabels[card.recipientType] || "Recipient";
-    const person = card.personId ? ` ${card.personId}` : "";
-    const reduction = card.requiresReduction
-      ? ` — Slot ${card.reductionSlot}`
-      : " — no 2:00";
-
-    return {
-      text: `${card.periodTime} — ${recipient}${person}${reduction}`
-    };
-  });
-
-  renderMiniHistory(foulHistory, fouls, (foul) => {
+  renderMiniHistory($(`#${side}-foul-history`), fouls, (foul) => {
     const threshold = match.settings.foulThreshold;
 
     if (foul.number === threshold) {
       return {
-        text: `${foul.periodTime} — Foul ${foul.number} — 10m`,
+        text: `${foul.phase} ${foul.periodTime} — Foul ${foul.number} — 10m`,
         className: "threshold-entry"
       };
     }
 
     if (foul.number === threshold - 1) {
       return {
-        text: `${foul.periodTime} — Foul ${foul.number} — warning`,
+        text: `${foul.phase} ${foul.periodTime} — Foul ${foul.number} — warning`,
         className: "warning-entry"
       };
     }
 
     return {
-      text: `${foul.periodTime} — Foul ${foul.number}`
+      text: `${foul.phase} ${foul.periodTime} — Foul ${foul.number}`
+    };
+  });
+
+  renderMiniHistory($(`#${side}-yellow-history`), yellows, (card) => {
+    const count = match.incidents.cards.filter((other) => (
+      other.side === side &&
+      other.type === "YC" &&
+      String(other.playerNumber).trim() === String(card.playerNumber).trim()
+    )).length;
+
+    return {
+      text: `${card.phase}${card.periodTime ? ` ${card.periodTime}` : ""} — YC No. ${card.playerNumber}${count >= 2 ? " — 2nd YC" : ""}`,
+      className: count >= 2 ? "warning-entry" : ""
+    };
+  });
+
+  renderMiniHistory($(`#${side}-red-history`), reds, (card) => {
+    const labels = {
+      player: "Player",
+      substitute: "Substitute",
+      official: "Official",
+      other: "Other"
+    };
+
+    const reduction = card.requiresReduction
+      ? card.pendingNextPeriod
+        ? " — 2:00 next period"
+        : ` — Slot ${card.reductionSlot}`
+      : " — no 2:00";
+
+    const dogso = card.dogso ? " — DOGSO" : "";
+
+    return {
+      text: `${card.phase}${card.periodTime ? ` ${card.periodTime}` : ""} — RC ${labels[card.recipientType]} ${card.personId || ""}${dogso}${reduction}`
     };
   });
 }
@@ -1071,65 +1311,116 @@ function renderTeamIncidentHistories(side) {
 function renderCentreControls() {
   const phase = match.period.phase;
 
-  if (phase === "halfTime") {
+  if (["psoSetup", "pso", "matchOver"].includes(phase)) {
     elements.startButton.disabled = true;
     elements.pauseButton.disabled = true;
-    elements.pauseButton.textContent = "Pause";
+    elements.resetButton.disabled = true;
+    elements.undoButton.disabled = match.history.length === 0;
+    elements.proceedButton.disabled = phase === "matchOver";
+    elements.proceedButton.textContent = phase === "matchOver" ? "Match Over" : "End Match";
+    return;
+  }
+
+  if (isBreakPhase()) {
+    elements.startButton.disabled = true;
+    elements.pauseButton.disabled = true;
     elements.resetButton.disabled = true;
     elements.undoButton.disabled = match.history.length === 0;
 
-    elements.proceedButton.textContent = "Start Second Half";
+    if (phase === "halfTime") {
+      elements.proceedButton.textContent = "Start Second Half";
+    } else if (phase === "fullTimeBreak") {
+      elements.proceedButton.textContent = "Extra Time Coin Toss";
+    } else {
+      elements.proceedButton.textContent = "Start Extra-Time Second Half";
+    }
+
     elements.proceedButton.disabled = false;
     return;
   }
 
   const timer = match.period.matchTimer;
+  const fullLength = periodLengthSeconds();
 
-  const fullPeriodLength = isExtraTime()
-    ? match.settings.extraTimeSeconds
-    : match.settings.halfSeconds;
-
-  const periodHasNotStarted =
+  const notStarted =
     !timer.running &&
     !timer.completed &&
-    timer.remainingSeconds === fullPeriodLength;
+    timer.remainingSeconds === fullLength;
 
-  const canPauseOrResume =
-    isMatchActive() &&
-    !timer.completed &&
-    timer.remainingSeconds > 0;
-
-  elements.startButton.disabled =
-    !isMatchActive() ||
-    !periodHasNotStarted;
-
-  elements.pauseButton.disabled = !canPauseOrResume;
+  elements.startButton.disabled = !notStarted;
+  elements.pauseButton.disabled = timer.completed || timer.remainingSeconds <= 0;
   elements.pauseButton.textContent = timer.running ? "Pause" : "Resume";
-
-  elements.resetButton.disabled = !isMatchActive();
-
-  elements.undoButton.disabled =
-    !isMatchActive() ||
-    match.history.length === 0;
+  elements.resetButton.disabled = false;
+  elements.undoButton.disabled = match.history.length === 0;
 
   if (phase === "firstHalf") {
     elements.proceedButton.textContent = "Proceed to Half-time";
-    elements.proceedButton.disabled = false;
   } else if (phase === "secondHalf") {
-    elements.proceedButton.textContent = match.settings.extraTimeEnabled
-      ? "Proceed to Extra Time / End Match"
-      : "End Match";
-    elements.proceedButton.disabled = false;
+    elements.proceedButton.textContent = "Proceed after Full Time";
   } else if (phase === "extraTime1") {
-    elements.proceedButton.textContent = "Start Extra-Time Second Half";
-    elements.proceedButton.disabled = false;
+    elements.proceedButton.textContent = "Proceed to Extra-time Half-time";
   } else if (phase === "extraTime2") {
-    elements.proceedButton.textContent = "End Match";
-    elements.proceedButton.disabled = false;
-  } else {
-    elements.proceedButton.textContent = "Match Over";
-    elements.proceedButton.disabled = true;
+    elements.proceedButton.textContent = "Proceed after Extra Time";
   }
+
+  elements.proceedButton.disabled = false;
+}
+
+function renderPso() {
+  const show = ["psoSetup", "pso"].includes(match.period.phase);
+  elements.psoPanel.classList.toggle("hidden", !show);
+
+  if (!show) return;
+
+  const homeKicks = match.incidents.psoKicks.filter((kick) => kick.side === "home");
+  const awayKicks = match.incidents.psoKicks.filter((kick) => kick.side === "away");
+
+  const homeScore = homeKicks.filter((kick) => kick.result === "goal").length;
+  const awayScore = awayKicks.filter((kick) => kick.result === "goal").length;
+
+  elements.psoHomeName.textContent = teamName("home");
+  elements.psoAwayName.textContent = teamName("away");
+  elements.psoHomeScore.textContent = homeScore;
+  elements.psoAwayScore.textContent = awayScore;
+
+  renderPsoKickDots(elements.psoHomeKicks, homeKicks);
+  renderPsoKickDots(elements.psoAwayKicks, awayKicks);
+
+  const setupComplete = Boolean(match.pso.firstTeam);
+
+  elements.psoSetupControls.classList.toggle("hidden", setupComplete);
+  elements.psoKickControls.classList.toggle("hidden", !setupComplete || match.pso.completed);
+
+  if (!setupComplete) {
+    elements.psoStatus.textContent =
+      `Choose which team takes the first kick. Initial rounds: ${match.settings.psoRounds} kicks per team.`;
+    return;
+  }
+
+  if (match.pso.completed) {
+    elements.psoStatus.textContent =
+      `Shoot-out complete — ${teamName(match.pso.winner)} win ${homeScore}–${awayScore}.`;
+    return;
+  }
+
+  const stage = match.pso.suddenDeath
+    ? "Sudden death"
+    : `Initial series: ${match.settings.psoRounds} kicks per team`;
+
+  elements.psoStatus.textContent = stage;
+  elements.psoNextTeam.textContent = teamName(match.pso.nextTeam);
+  elements.psoSuddenDeath.classList.toggle("hidden", match.pso.suddenDeath);
+}
+
+function renderPsoKickDots(container, kicks) {
+  container.innerHTML = "";
+
+  kicks.forEach((kick) => {
+    const dot = document.createElement("span");
+    dot.className = `pso-kick ${kick.result}`;
+    dot.textContent = kick.result === "goal" ? "✓" : "✕";
+    container.appendChild(dot);
+  });
 }
 
 function renderEventList() {
@@ -1146,74 +1437,65 @@ function renderEventList() {
 
   events.forEach((event) => {
     const li = document.createElement("li");
+    const time = event.periodTime ? ` ${event.periodTime}` : "";
 
     li.textContent =
-      `${formatDateTime(event.at)} | ${event.period} | ` +
-      `${event.periodTime} | ${event.description}`;
+      `${formatDateTime(event.at)} | ${event.phase}${time} | ${event.description}`;
 
     elements.eventList.appendChild(li);
   });
 }
 
 function recordFoul(side) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!canRecordGoalOrFoul()) return;
 
   const team = match.teams[side];
-  const previous = team.foulCount;
-  const next = previous + 1;
+  const number = team.foulCount + 1;
   const threshold = match.settings.foulThreshold;
-  const warningAt = threshold - 1;
 
-  snapshot(`${teamName(side)} accumulated foul ${previous} → ${next}`);
+  snapshot(`${teamName(side)} accumulated foul ${team.foulCount} → ${number}`);
 
-  team.foulCount = next;
+  team.foulCount = number;
 
   const foul = {
     id: uniqueId(),
     side,
-    number: next,
-    period: periodName(),
+    number,
+    phase: phaseCode(),
     periodTime: currentPeriodTime(),
     cumulativeTime: currentCumulativeTime(),
     recordedAt: new Date().toISOString()
   };
 
   match.incidents.fouls.push(foul);
+  addEvent(`${teamName(side)} accumulated foul ${number}.`);
 
-  addEvent(`${teamName(side)} accumulated foul ${next} at ${foul.periodTime}.`);
-
-  if (next === warningAt) {
-    showAlert(
-      "5-foul warning",
-      `${teamName(side)} have reached ${warningAt} accumulated fouls.`
-    );
+  if (number === threshold - 1) {
+    showAlert("5-foul warning", `${teamName(side)} have reached ${number} accumulated fouls.`);
   }
 
-  if (next === threshold) {
-    showAlert(
-      "10m Free Kick",
-      `${teamName(side)} have reached ${threshold} accumulated fouls.`
-    );
+  if (number === threshold) {
+    showAlert("10m Free Kick", `${teamName(side)} have reached ${number} accumulated fouls.`);
   }
 
   render();
 }
 
-function recordGoal(side, details) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+function recordGoal(scoringSide, details = {}) {
+  if (!canRecordGoalOrFoul()) return;
 
-  snapshot(`${teamName(side)} goal recorded`);
+  snapshot(`${teamName(scoringSide)} goal recorded`);
 
-  match.teams[side].score += 1;
+  match.teams[scoringSide].score += 1;
 
   const goal = {
     id: uniqueId(),
-    side,
+    displaySide: scoringSide,
     scorerNumber: details.scorerNumber || "",
-    penalty: Boolean(details.penalty),
-    tenMetre: Boolean(details.tenMetre),
+    type: details.type || "openPlay",
+    ownGoalSide: details.ownGoalSide || null,
     note: details.note || "",
-    period: periodName(),
+    phase: phaseCode(),
     periodTime: currentPeriodTime(),
     cumulativeTime: currentCumulativeTime(),
     recordedAt: new Date().toISOString()
@@ -1221,23 +1503,50 @@ function recordGoal(side, details) {
 
   match.incidents.goals.push(goal);
 
-  const goalType = goal.tenMetre
-    ? "10m free kick"
-    : goal.penalty
-      ? "penalty"
-      : "open play";
+  const labels = {
+    openPlay: "goal",
+    penalty: "penalty goal",
+    tenMetre: "10m free-kick goal",
+    ownGoal: "own goal"
+  };
 
-  const scorer = goal.scorerNumber
-    ? ` by No. ${goal.scorerNumber}`
-    : "";
+  addEvent(
+    `${teamName(scoringSide)} ${labels[goal.type]}${goal.scorerNumber ? ` — No. ${goal.scorerNumber}` : ""}.`
+  );
 
-  addEvent(`${teamName(side)} goal (${goalType})${scorer}.`);
   render();
 }
 
-function countYellowCardsForPlayer(side, playerNumber) {
-  if (!playerNumber) return 0;
+function confirmGoalDialog() {
+  const selectedSide = elements.goalConfirm.dataset.scoringSide;
+  const type = elements.goalType.value;
+  const ownGoalSide = elements.goalConfirm.dataset.ownGoalSide || "";
 
+  if (!selectedSide) return;
+
+  let scoringSide = selectedSide;
+  let responsibleSide = ownGoalSide || selectedSide;
+
+  if (type === "ownGoal") {
+    scoringSide = opposite(selectedSide);
+    responsibleSide = selectedSide;
+  }
+
+  recordGoal(scoringSide, {
+    scorerNumber: elements.goalScorerNumber.value.trim(),
+    type,
+    ownGoalSide: type === "ownGoal" ? responsibleSide : null,
+    note: elements.goalNote.value.trim()
+  });
+
+  elements.goalDialog.close("confirm");
+
+  if (elements.goalConfirm.dataset.afterOpponentGoal === "true") {
+    completePendingOpponentGoalReduction();
+  }
+}
+
+function countYellowCardsForPlayer(side, playerNumber) {
   return match.incidents.cards.filter((card) => (
     card.side === side &&
     card.type === "YC" &&
@@ -1246,9 +1555,9 @@ function countYellowCardsForPlayer(side, playerNumber) {
 }
 
 function recordYellowCard(side, playerNumber, note) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!canRecordCards() || !playerNumber) return;
 
-  snapshot(`${teamName(side)} yellow card recorded`);
+  snapshot(`${teamName(side)} yellow card to ${playerNumber}`);
 
   match.teams[side].yellowCardsShown += 1;
 
@@ -1256,49 +1565,52 @@ function recordYellowCard(side, playerNumber, note) {
     id: uniqueId(),
     side,
     type: "YC",
-    playerNumber: playerNumber || "",
-    note: note || "",
-    period: periodName(),
+    playerNumber,
+    note,
+    phase: phaseCode(),
     periodTime: currentPeriodTime(),
     cumulativeTime: currentCumulativeTime(),
     recordedAt: new Date().toISOString()
   };
 
   match.incidents.cards.push(card);
+  addEvent(`${teamName(side)} yellow card to No. ${playerNumber}.`);
 
-  addEvent(
-    `${teamName(side)} yellow card${playerNumber ? ` to No. ${playerNumber}` : ""}.`
-  );
-
-  const yellowCount = countYellowCardsForPlayer(side, playerNumber);
+  const count = countYellowCardsForPlayer(side, playerNumber);
 
   render();
 
-  if (playerNumber && yellowCount >= 2) {
-    showAlert(
-      "Second yellow card — send-off required",
-      `${teamName(side)} player No. ${playerNumber} has received two yellow cards. The player should be shown a red card and sent off.`
-    );
+  if (count >= 2) {
+    showSecondYellowWarning(side, playerNumber);
   }
 }
 
 function recordRedCardFromDialog() {
   const side = elements.redConfirm.dataset.side;
   const recipientType = elements.redRecipientType.value;
+  const dogso = elements.redDogso.checked &&
+    ["substitute", "official"].includes(recipientType);
+
   const personId = elements.redPersonId.value.trim();
   const note = elements.redNote.value.trim();
   const chosenSlot = Number(elements.redSlotChoice.value);
-  const requiresReduction = recipientType === "player";
 
   if (!side) return;
 
-  if (requiresReduction) {
+  const requiresReduction =
+    recipientType === "player" ||
+    dogso;
+
+  const recordOnlyAfterMatch = match.period.phase === "matchOver";
+  const effectiveReduction = requiresReduction && !recordOnlyAfterMatch;
+
+  if (effectiveReduction) {
     const slot = match.teams[side].reductionSlots[chosenSlot];
 
     if (!slot || slot.status !== "available") {
       showAlert(
         "Reduction slot unavailable",
-        `Reduction Slot ${chosenSlot + 1} is not available. Use the other free slot or clear a completed slot first.`
+        `Reduction Slot ${chosenSlot + 1} is unavailable. Select a free slot or clear a completed slot first.`
       );
       return;
     }
@@ -1307,19 +1619,23 @@ function recordRedCardFromDialog() {
   snapshot(`${teamName(side)} red card recorded`);
 
   const cardId = uniqueId();
+  const pendingNextPeriod = effectiveReduction && isBreakPhase();
 
   match.teams[side].redCardsShown += 1;
 
-  if (requiresReduction) {
-    pauseMainClock();
-    pauseActiveReductionTimers();
+  if (effectiveReduction) {
+    if (isLivePhase()) {
+      pauseMainClock();
+      pauseActiveReductionTimers();
+    }
 
     match.teams[side].reductionSlots[chosenSlot] = {
-      status: "waiting",
+      status: pendingNextPeriod ? "pendingNextPeriod" : "waiting",
       timer: createTimer(RED_CARD_SECONDS),
-      startedAtPeriodTime: null,
+      startedAtPhase: null,
       completedReason: null,
-      dismissalId: cardId
+      dismissalId: cardId,
+      source: pendingNextPeriod ? "break" : "livePlay"
     };
   }
 
@@ -1329,22 +1645,28 @@ function recordRedCardFromDialog() {
     type: "RC",
     personId,
     recipientType,
-    requiresReduction,
-    reductionSlot: requiresReduction ? chosenSlot + 1 : null,
+    dogso,
+    requiresReduction: effectiveReduction,
+    pendingNextPeriod,
+    reductionSlot: effectiveReduction ? chosenSlot + 1 : null,
     note,
-    period: periodName(),
+    phase: phaseCode(),
     periodTime: currentPeriodTime(),
     cumulativeTime: currentCumulativeTime(),
     recordedAt: new Date().toISOString()
   });
 
-  if (requiresReduction) {
+  if (effectiveReduction && pendingNextPeriod) {
     addEvent(
-      `${teamName(side)} red card${personId ? ` to ${personId}` : ""}. Main clock paused; Reduction Slot ${chosenSlot + 1} is waiting.`
+      `${teamName(side)} red card${personId ? ` to ${personId}` : ""}. Two-minute reduction pending next period in Slot ${chosenSlot + 1}.`
+    );
+  } else if (effectiveReduction) {
+    addEvent(
+      `${teamName(side)} red card${personId ? ` to ${personId}` : ""}. Main clock stopped; Reduction Slot ${chosenSlot + 1} waiting.`
     );
   } else {
     addEvent(
-      `${teamName(side)} red card to ${recipientType}${personId ? ` ${personId}` : ""}. No two-minute reduction.`
+      `${teamName(side)} red card to ${recipientType}${personId ? ` ${personId}` : ""}. Record only; no two-minute reduction.`
     );
   }
 
@@ -1356,16 +1678,13 @@ function startTimeout(side) {
   if (!canUseTimeout()) return;
 
   const team = match.teams[side];
-
   if (team.timeoutUsed || team.timeoutTimer.running) return;
 
   showConfirm(
     "Confirm time-out",
-    `Grant a ${formatSeconds(match.settings.timeoutSeconds)} time-out to ${teamName(side)}? The main clock and active two-minute reductions will pause.`,
+    `Grant a ${formatSeconds(match.settings.timeoutSeconds)} time-out to ${teamName(side)}? Main clock and active reductions will pause.`,
     () => {
-      snapshot(
-        `${teamName(side)} time-out started; main clock and active reductions paused`
-      );
+      snapshot(`${teamName(side)} time-out started`);
 
       pauseMainClock();
       pauseActiveReductionTimers();
@@ -1374,10 +1693,7 @@ function startTimeout(side) {
       team.timeoutTimer = createTimer(match.settings.timeoutSeconds);
       setTimerRunning(team.timeoutTimer, true);
 
-      addEvent(
-        `${teamName(side)} time-out started. Main clock and active reductions paused.`
-      );
-
+      addEvent(`${teamName(side)} time-out started.`);
       startTicker();
       render();
     }
@@ -1385,225 +1701,191 @@ function startTimeout(side) {
 }
 
 function startReductionAndResumeMatch(side, index) {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!isLivePhase()) return;
 
   const slot = match.teams[side].reductionSlots[index];
-
   if (slot.status !== "waiting") return;
 
   showConfirm(
     "Start reduction timer",
-    `Start the two-minute reduction for ${teamName(side)} and resume the main match clock?`,
+    `Start the two-minute reduction for ${teamName(side)} and resume the main clock?`,
     () => {
-      snapshot(
-        `${teamName(side)} Reduction Slot ${index + 1} started and match resumed`
-      );
+      snapshot(`${teamName(side)} Reduction Slot ${index + 1} started`);
 
       slot.status = "running";
-      slot.startedAtPeriodTime = currentPeriodTime();
+      slot.startedAtPhase = phaseCode();
 
       setTimerRunning(slot.timer, true);
       startOrResumeMainClock();
 
-      addEvent(
-        `${teamName(side)} Reduction Slot ${index + 1} started. Main clock resumed.`
-      );
-
-      startTicker();
+      addEvent(`${teamName(side)} Reduction Slot ${index + 1} started; main clock resumed.`);
       render();
     }
   );
 }
 
-function endReductionForOpponentGoal(side, index) {
+function openOpponentGoalDialog(side, index) {
   const slot = match.teams[side].reductionSlots[index];
-
   if (slot.status !== "running") return;
 
-  showConfirm(
-    "Opponent goal and numerical reduction",
-    `End ${teamName(side)} Reduction Slot ${index + 1} because the opponent scored? Use this only when the applicable numerical-advantage condition is met.`,
-    () => {
-      snapshot(
-        `${teamName(side)} Reduction Slot ${index + 1} ended by opponent goal`
-      );
+  pendingOpponentGoal = { side, index, opponent: opposite(side) };
+  elements.opponentGoalDialog.showModal();
+}
 
-      setTimerRunning(slot.timer, false);
-      slot.timer.remainingSeconds = 0;
-      slot.timer.completed = true;
-      slot.status = "completed";
-      slot.completedReason = "ended by opponent goal";
+function completePendingOpponentGoalReduction() {
+  if (!pendingOpponentGoal) return;
 
-      addEvent(
-        `${teamName(side)} Reduction Slot ${index + 1} ended early because the opponent scored.`
-      );
+  const { side, index } = pendingOpponentGoal;
+  const slot = match.teams[side].reductionSlots[index];
 
-      render();
-    }
-  );
+  if (slot && slot.status === "running") {
+    snapshot(`${teamName(side)} Reduction Slot ${index + 1} ended by opponent goal`);
+
+    setTimerRunning(slot.timer, false);
+    slot.timer.remainingSeconds = 0;
+    slot.timer.completed = true;
+    slot.status = "completed";
+    slot.completedReason = "ended by opponent goal";
+
+    addEvent(`${teamName(side)} Reduction Slot ${index + 1} ended by opponent goal.`);
+  }
+
+  pendingOpponentGoal = null;
+  render();
 }
 
 function clearReductionSlot(side, index) {
   const slot = match.teams[side].reductionSlots[index];
-
   if (slot.status !== "completed") return;
 
   showConfirm(
     "Clear reduction slot",
-    `Clear ${teamName(side)} Reduction Slot ${index + 1} for a later sending-off? The permanent red-card record remains unchanged.`,
+    `Clear ${teamName(side)} Reduction Slot ${index + 1} for future use? The red-card history remains recorded.`,
     () => {
-      snapshot(
-        `${teamName(side)} Reduction Slot ${index + 1} cleared for reuse`
-      );
+      snapshot(`${teamName(side)} Reduction Slot ${index + 1} cleared`);
 
       match.teams[side].reductionSlots[index] = createReductionSlot();
-
-      addEvent(
-        `${teamName(side)} Reduction Slot ${index + 1} cleared and ready for reuse.`
-      );
-
+      addEvent(`${teamName(side)} Reduction Slot ${index + 1} cleared for reuse.`);
       render();
     }
   );
 }
 
 function startMatchTimer() {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!isLivePhase()) return;
 
   const timer = match.period.matchTimer;
 
-  const fullPeriodLength = isExtraTime()
-    ? match.settings.extraTimeSeconds
-    : match.settings.halfSeconds;
+  if (
+    timer.running ||
+    timer.completed ||
+    timer.remainingSeconds !== periodLengthSeconds()
+  ) {
+    return;
+  }
 
-  const periodHasNotStarted =
-    !timer.running &&
-    !timer.completed &&
-    timer.remainingSeconds === fullPeriodLength;
-
-  if (!periodHasNotStarted) return;
-
-  snapshot(`${periodName()} main match clock started`);
+  snapshot(`${phaseName()} main clock started`);
   startOrResumeMainClock();
-
-  addEvent(`${periodName()} main match clock started.`);
+  addEvent(`${phaseName()} main clock started.`);
   render();
 }
 
 function pauseResumeMatchTimer() {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!isLivePhase()) return;
 
   const timer = match.period.matchTimer;
 
   if (timer.running) {
-    snapshot(`${periodName()} main clock and active reductions paused`);
+    snapshot(`${phaseName()} main clock paused`);
 
     pauseMainClock();
     pauseActiveReductionTimers();
 
-    addEvent(
-      `${periodName()} main clock and active reductions paused at ${formatSeconds(timer.remainingSeconds)}.`
-    );
-
+    addEvent(`${phaseName()} main clock and active reductions paused.`);
     render();
     return;
   }
 
-  if (timer.remainingSeconds <= 0 || timer.completed) return;
+  if (timer.completed || timer.remainingSeconds <= 0) return;
 
   if (hasWaitingReduction()) {
     showAlert(
       "Start the red-card reduction first",
-      `A red-card reduction is waiting: ${firstWaitingReductionDescription()}. Use its “Start 2:00 / Resume Match” button to start the reduction and resume the match clock.`
+      `A reduction is waiting: ${firstWaitingReductionDescription()}. Use its Start 2:00 / Resume Match button instead.`
     );
     return;
   }
 
-  snapshot(`${periodName()} main clock and active reductions resumed`);
-
+  snapshot(`${phaseName()} main clock resumed`);
   startOrResumeMainClock();
-
-  addEvent(`${periodName()} main clock and active reductions resumed.`);
+  addEvent(`${phaseName()} main clock and active reductions resumed.`);
   render();
 }
 
 function resetCurrentPeriod() {
-  if (!isMatchActive() || match.period.phase === "halfTime") return;
+  if (!isLivePhase()) return;
 
   showConfirm(
     "Reset current period",
-    `Reset ${periodName()} to its original duration? Scores, fouls, cards, time-outs, and reductions are not removed.`,
+    `Reset ${phaseName()} to its original duration? Scores, cards, fouls and time-outs remain recorded.`,
     () => {
-      snapshot(`${periodName()} main clock reset`);
+      snapshot(`${phaseName()} main clock reset`);
 
-      const seconds = isExtraTime()
-        ? match.settings.extraTimeSeconds
-        : match.settings.halfSeconds;
-
-      match.period.matchTimer = createTimer(seconds);
-
-      addEvent(
-        `${periodName()} main clock reset to ${formatSeconds(seconds)}.`
-      );
-
+      match.period.matchTimer = createTimer(periodLengthSeconds());
+      addEvent(`${phaseName()} main clock reset.`);
       render();
     }
   );
 }
 
 function undoPreviousStep() {
-  if (match.history.length === 0 || !isMatchActive()) return;
+  if (match.history.length === 0) return;
 
   const previous = match.history[match.history.length - 1];
 
   showConfirm(
     "Undo previous step",
-    `Are you sure you want to undo the previous step: ${previous.description}?`,
+    `Are you sure you want to undo: ${previous.description}?`,
     () => {
       const entry = match.history.pop();
 
       match.teams = entry.state.teams;
       match.period = entry.state.period;
       match.incidents = entry.state.incidents;
+      match.pso = entry.state.pso;
       match.endedAt = entry.state.endedAt;
 
       addEvent(`Undo performed: ${entry.description}.`);
-
       restoreTimerStatesAfterLoad();
       render();
     }
   );
 }
 
-function resetFoulsAndTimeoutsForSecondHalf() {
+function resetForSecondHalf() {
   ["home", "away"].forEach((side) => {
-    const team = match.teams[side];
-
-    team.foulCount = 0;
-    team.timeoutUsed = false;
-    team.timeoutTimer = createTimer(match.settings.timeoutSeconds);
+    match.teams[side].foulCount = 0;
+    match.teams[side].timeoutUsed = false;
+    match.teams[side].timeoutTimer = createTimer(match.settings.timeoutSeconds);
   });
+}
+
+function beginBreak(nextPhase, seconds, reason) {
+  pauseMainClock();
+  stopReductionsAtPeriodEnd(reason);
+
+  match.period.phase = nextPhase;
+  match.period.breakTimer = createTimer(seconds);
+  setTimerRunning(match.period.breakTimer, true);
+
+  addEvent(`${phaseName()} count-down started from ${formatSeconds(seconds)}.`);
+  startTicker();
+  render();
 }
 
 function enterHalfTime() {
   snapshot("Proceeded to half-time");
-
-  pauseMainClock();
-  pauseActiveReductionTimers();
-
-  match.period.phase = "halfTime";
-  match.period.number = 1;
-  match.period.breakTimer = createTimer(match.settings.breakSeconds);
-  match.period.activeKickoff = match.period.secondKickoff;
-
-  setTimerRunning(match.period.breakTimer, true);
-
-  addEvent(
-    `First Half ended. Half-time count-down started from ${formatSeconds(match.settings.breakSeconds)}.`
-  );
-
-  startTicker();
-  render();
+  beginBreak("halfTime", match.settings.halfTimeBreakSeconds, "stopped at end of First Half");
 }
 
 function startSecondHalf() {
@@ -1612,64 +1894,226 @@ function startSecondHalf() {
   setTimerRunning(match.period.breakTimer, false);
 
   match.period.phase = "secondHalf";
-  match.period.number = 2;
   match.period.matchTimer = createTimer(match.settings.halfSeconds);
   match.period.activeKickoff = match.period.secondKickoff;
 
-  resetFoulsAndTimeoutsForSecondHalf();
+  resetForSecondHalf();
+  activatePendingReductionsForNextPeriod();
 
-  addEvent(
-    "Second Half prepared. Accumulated fouls reset and one time-out restored to each team."
-  );
-
+  addEvent("Second Half prepared. Fouls reset; time-outs restored; pending reductions ready.");
   render();
 }
 
-function startExtraTimeOne() {
-  snapshot("Started Extra Time – First Half");
+function enterFullTimeBreak() {
+  snapshot("Entered full-time break");
+  beginBreak("fullTimeBreak", match.settings.fullTimeBreakSeconds, "stopped at end of Second Half");
+}
 
-  pauseMainClock();
-  pauseActiveReductionTimers();
+function chooseExtraTimeKickoff(side) {
+  snapshot(`Extra-time coin toss: ${teamName(side)} kick off ET1`);
 
+  setTimerRunning(match.period.breakTimer, false);
+
+  match.period.extraTimeFirstKickoff = side;
+  match.period.activeKickoff = side;
   match.period.phase = "extraTime1";
-  match.period.number = 1;
   match.period.matchTimer = createTimer(match.settings.extraTimeSeconds);
 
-  ["home", "away"].forEach((side) => {
-    match.teams[side].timeoutUsed = true;
-    match.teams[side].timeoutTimer = createTimer(match.settings.timeoutSeconds);
-  });
+  activatePendingReductionsForNextPeriod();
 
-  addEvent(
-    "Extra Time – First Half prepared. Second-half accumulated fouls carry over. Time-outs are unavailable."
-  );
-
+  addEvent(`${teamName(side)} selected to kick off first half of extra time.`);
+  elements.etCoinDialog.close(side);
   render();
+}
+
+function enterExtraTimeHalfTime() {
+  snapshot("Proceeded to extra-time half-time");
+  beginBreak(
+    "extraTimeHalfTime",
+    match.settings.extraTimeBreakSeconds,
+    "stopped at end of Extra Time First Half"
+  );
 }
 
 function startExtraTimeTwo() {
-  snapshot("Started Extra Time – Second Half");
+  snapshot("Started Extra Time Second Half");
+
+  setTimerRunning(match.period.breakTimer, false);
+
+  match.period.phase = "extraTime2";
+  match.period.matchTimer = createTimer(match.settings.extraTimeSeconds);
+  match.period.activeKickoff = opposite(match.period.extraTimeFirstKickoff);
+
+  activatePendingReductionsForNextPeriod();
+
+  addEvent("Extra Time Second Half prepared. Pending reductions ready.");
+  render();
+}
+
+function openPsoSetup() {
+  snapshot("Penalty shoot-out setup opened");
 
   pauseMainClock();
   pauseActiveReductionTimers();
 
-  match.period.phase = "extraTime2";
-  match.period.number = 2;
-  match.period.matchTimer = createTimer(match.settings.extraTimeSeconds);
-  match.period.activeKickoff = opposite(match.period.activeKickoff);
+  match.period.phase = "psoSetup";
+  match.pso.active = true;
+  match.pso.completed = false;
+  match.pso.firstTeam = null;
+  match.pso.nextTeam = null;
+  match.pso.suddenDeath = false;
+  match.pso.winner = null;
+
+  addEvent("Penalty shoot-out setup opened.");
+  render();
+}
+
+function selectPsoFirstTeam(side) {
+  snapshot(`${teamName(side)} selected to take first PSO kick`);
+
+  match.period.phase = "pso";
+  match.pso.firstTeam = side;
+  match.pso.nextTeam = side;
+
+  addEvent(`${teamName(side)} selected to take the first penalty shoot-out kick.`);
+  render();
+}
+
+function getPsoKicks(side) {
+  return match.incidents.psoKicks.filter((kick) => kick.side === side);
+}
+
+function getPsoScore(side) {
+  return getPsoKicks(side).filter((kick) => kick.result === "goal").length;
+}
+
+function psoHasInitialSeriesFinished() {
+  return (
+    getPsoKicks("home").length >= match.settings.psoRounds &&
+    getPsoKicks("away").length >= match.settings.psoRounds
+  );
+}
+
+function psoWinnerIfClinched() {
+  const homeTaken = getPsoKicks("home").length;
+  const awayTaken = getPsoKicks("away").length;
+  const homeGoals = getPsoScore("home");
+  const awayGoals = getPsoScore("away");
+  const rounds = match.settings.psoRounds;
+
+  if (!match.pso.suddenDeath) {
+    const homeRemaining = Math.max(0, rounds - homeTaken);
+    const awayRemaining = Math.max(0, rounds - awayTaken);
+
+    if (homeGoals > awayGoals + awayRemaining) return "home";
+    if (awayGoals > homeGoals + homeRemaining) return "away";
+
+    if (
+      homeTaken >= rounds &&
+      awayTaken >= rounds &&
+      homeGoals !== awayGoals
+    ) {
+      return homeGoals > awayGoals ? "home" : "away";
+    }
+
+    return null;
+  }
+
+  if (homeTaken === awayTaken && homeTaken > 0 && homeGoals !== awayGoals) {
+    return homeGoals > awayGoals ? "home" : "away";
+  }
+
+  return null;
+}
+
+function recordPsoKick() {
+  if (match.period.phase !== "pso" || match.pso.completed) return;
+
+  const selected = document.querySelector('input[name="pso-result"]:checked');
+  const taker = elements.psoTakerNumber.value.trim();
+
+  if (!taker) {
+    showAlert("Taker number required", "Enter the penalty taker’s number or identifier.");
+    return;
+  }
+
+  if (!selected) {
+    showAlert("Kick result required", "Choose Goal or No goal before recording the kick.");
+    return;
+  }
+
+  const side = match.pso.nextTeam;
+
+  snapshot(`${teamName(side)} PSO kick recorded`);
+
+  const kick = {
+    id: uniqueId(),
+    side,
+    taker,
+    result: selected.value,
+    phase: "PSO",
+    recordedAt: new Date().toISOString()
+  };
+
+  match.incidents.psoKicks.push(kick);
 
   addEvent(
-    "Extra Time – Second Half prepared. Accumulated fouls continue. Time-outs remain unavailable."
+    `PSO — ${teamName(side)} No. ${taker}: ${kick.result === "goal" ? "Goal" : "No goal"}.`
   );
 
+  const winner = psoWinnerIfClinched();
+
+  if (winner) {
+    match.pso.completed = true;
+    match.pso.winner = winner;
+
+    showAlert(
+      "Shoot-out over",
+      `${teamName(winner)} win the penalty shoot-out ${getPsoScore("home")}–${getPsoScore("away")}.`
+    );
+  } else {
+    match.pso.nextTeam = opposite(side);
+  }
+
+  elements.psoTakerNumber.value = "";
+  document.querySelectorAll('input[name="pso-result"]').forEach((input) => {
+    input.checked = false;
+  });
+
+  render();
+}
+
+function beginSuddenDeath() {
+  if (match.period.phase !== "pso" || match.pso.completed) return;
+
+  if (!psoHasInitialSeriesFinished()) {
+    showAlert(
+      "Initial series not complete",
+      `Both teams should complete ${match.settings.psoRounds} initial kicks before sudden death is started manually.`
+    );
+    return;
+  }
+
+  if (getPsoScore("home") !== getPsoScore("away")) {
+    showAlert(
+      "Shoot-out already decided",
+      "The shoot-out has already produced a winner."
+    );
+    return;
+  }
+
+  snapshot("Penalty shoot-out sudden death started");
+
+  match.pso.suddenDeath = true;
+  addEvent("Penalty shoot-out sudden death started.");
   render();
 }
 
 function endMatch() {
   showConfirm(
     "End match",
-    "Are you sure you want to end the match? The match remains on this device for CSV export.",
-    () => {
+    "Are you sure you want to end the match? The CSV can still be exported afterwards.",
+    async () => {
       snapshot("Match ended");
 
       pauseMainClock();
@@ -1685,62 +2129,90 @@ function endMatch() {
 
       addEvent("Match ended.");
       saveMatch();
-      render();
 
-      showAlert(
-        "Match Over",
-        "The match has ended. Export the CSV match log before starting another match."
-      );
+      await releaseWakeLock();
+      render();
     }
   );
 }
 
 function proceed() {
-  if (!match) return;
+  const phase = match.period.phase;
 
-  if (match.period.phase === "firstHalf") {
+  if (phase === "firstHalf") {
     showConfirm(
       "Proceed to half-time",
-      `End the First Half and start the ${formatSeconds(match.settings.breakSeconds)} half-time count-down?`,
+      `End the First Half and start the ${formatSeconds(match.settings.halfTimeBreakSeconds)} half-time count-down?`,
       enterHalfTime
     );
     return;
   }
 
-  if (match.period.phase === "halfTime") {
+  if (phase === "halfTime") {
     showConfirm(
       "Start Second Half",
-      "Start the Second Half? Accumulated fouls reset and each team receives one new time-out.",
+      "Prepare the Second Half? Fouls reset, time-outs restore, and any pending reduction becomes ready.",
       startSecondHalf
     );
     return;
   }
 
-  if (match.period.phase === "secondHalf") {
-    if (!match.settings.extraTimeEnabled) {
+  if (phase === "secondHalf") {
+    if (match.settings.extraTimeEnabled) {
+      showConfirm(
+        "After regular time",
+        "Play extra time? Select Yes to start the full-time break. Select No to continue to the next available decision.",
+        enterFullTimeBreak,
+        () => {
+          if (match.settings.psoEnabled) {
+            openPsoSetup();
+          } else {
+            endMatch();
+          }
+        }
+      );
+    } else if (match.settings.psoEnabled) {
+      openPsoSetup();
+    } else {
       endMatch();
-      return;
     }
 
+    return;
+  }
+
+  if (phase === "fullTimeBreak") {
+    elements.etCoinDialog.showModal();
+    return;
+  }
+
+  if (phase === "extraTime1") {
     showConfirm(
-      "After the Second Half",
-      "Play extra time? Select Yes to prepare the first extra-time period. Select No to end the match.",
-      startExtraTimeOne,
-      endMatch
+      "Proceed to extra-time half-time",
+      `End ET1 and start the ${formatSeconds(match.settings.extraTimeBreakSeconds)} break?`,
+      enterExtraTimeHalfTime
     );
     return;
   }
 
-  if (match.period.phase === "extraTime1") {
+  if (phase === "extraTimeHalfTime") {
     showConfirm(
-      "Start extra-time second half",
-      "Proceed to the second half of extra time?",
+      "Start Extra Time Second Half",
+      "Prepare ET2 and activate any pending reduction slots?",
       startExtraTimeTwo
     );
     return;
   }
 
-  if (match.period.phase === "extraTime2") {
+  if (phase === "extraTime2") {
+    if (match.settings.psoEnabled) {
+      openPsoSetup();
+    } else {
+      endMatch();
+    }
+    return;
+  }
+
+  if (phase === "psoSetup" || phase === "pso") {
     endMatch();
   }
 }
@@ -1760,14 +2232,14 @@ function exportCsv() {
     ["Home red cards", match.teams.home.redCardsShown],
     ["Away red cards", match.teams.away.redCardsShown],
     [],
-    ["Match Event Log"],
-    ["Timestamp", "Period", "Period Time", "Cumulative Time", "Event"]
+    ["Event Log"],
+    ["Timestamp", "Phase", "Period Time", "Cumulative Time", "Event"]
   ];
 
   match.events.forEach((event) => {
     rows.push([
       event.at,
-      event.period,
+      event.phase,
       event.periodTime,
       event.cumulativeTime,
       event.description
@@ -1777,11 +2249,11 @@ function exportCsv() {
   rows.push([]);
   rows.push(["Goals"]);
   rows.push([
-    "Team",
+    "Scoring Team",
+    "Goal Type",
     "Scorer Number",
-    "Penalty Goal",
-    "10m Free Kick Goal",
-    "Period",
+    "Own Goal By",
+    "Phase",
     "Period Time",
     "Cumulative Time",
     "Note"
@@ -1789,32 +2261,26 @@ function exportCsv() {
 
   match.incidents.goals.forEach((goal) => {
     rows.push([
-      teamName(goal.side),
-      goal.scorerNumber || "",
-      goal.penalty ? "Yes" : "No",
-      goal.tenMetre ? "Yes" : "No",
-      goal.period,
+      teamName(goal.displaySide),
+      goal.type,
+      goal.scorerNumber,
+      goal.ownGoalSide ? teamName(goal.ownGoalSide) : "",
+      goal.phase,
       goal.periodTime,
       goal.cumulativeTime,
-      goal.note || ""
+      goal.note
     ]);
   });
 
   rows.push([]);
   rows.push(["Accumulated Fouls"]);
-  rows.push([
-    "Team",
-    "Foul Number",
-    "Period",
-    "Period Time",
-    "Cumulative Time"
-  ]);
+  rows.push(["Team", "Foul Number", "Phase", "Period Time", "Cumulative Time"]);
 
   match.incidents.fouls.forEach((foul) => {
     rows.push([
       teamName(foul.side),
       foul.number,
-      foul.period,
+      foul.phase,
       foul.periodTime,
       foul.cumulativeTime
     ]);
@@ -1827,9 +2293,10 @@ function exportCsv() {
     "Card",
     "Player / Official ID",
     "Recipient Type",
+    "DOGSO",
     "Two-minute Reduction",
     "Reduction Slot",
-    "Period",
+    "Phase",
     "Period Time",
     "Cumulative Time",
     "Note"
@@ -1840,15 +2307,27 @@ function exportCsv() {
       teamName(card.side),
       card.type,
       card.playerNumber || card.personId || "",
-      card.type === "RC" ? (card.recipientType || "") : "player",
-      card.type === "RC"
-        ? (card.requiresReduction ? "Yes" : "No")
-        : "",
-      card.type === "RC" ? (card.reductionSlot || "") : "",
-      card.period,
+      card.type === "RC" ? card.recipientType : "player",
+      card.dogso ? "Yes" : "No",
+      card.requiresReduction ? "Yes" : "No",
+      card.reductionSlot || "",
+      card.phase,
       card.periodTime,
       card.cumulativeTime,
       card.note || ""
+    ]);
+  });
+
+  rows.push([]);
+  rows.push(["Penalty Shoot-out"]);
+  rows.push(["Team", "Taker", "Result", "Kick Number"]);
+
+  match.incidents.psoKicks.forEach((kick, index) => {
+    rows.push([
+      teamName(kick.side),
+      kick.taker,
+      kick.result === "goal" ? "Goal" : "No goal",
+      index + 1
     ]);
   });
 
@@ -1866,16 +2345,14 @@ function exportCsv() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
 
-  const home = safeFileName(teamName("home")) || "Home";
-  const away = safeFileName(teamName("away")) || "Away";
-
   link.href = url;
-  link.download = `${dateStamp()}_${home}_${away}.csv`;
+  link.download =
+    `${dateStamp()}_${safeFileName(teamName("home")) || "Home"}_` +
+    `${safeFileName(teamName("away")) || "Away"}.csv`;
 
   document.body.appendChild(link);
   link.click();
   link.remove();
-
   URL.revokeObjectURL(url);
 }
 
@@ -1884,8 +2361,9 @@ function beginNewMatch() {
 
   showConfirm(
     "Create new match",
-    "Start a new match? Export the current match log first if you need to retain it.",
-    () => {
+    "Start a new match? Export the current match log first if required.",
+    async () => {
+      await releaseWakeLock();
       clearMatch();
       elements.setupForm.reset();
 
@@ -1896,6 +2374,9 @@ function beginNewMatch() {
       elements.timeoutMinutes.value = "1";
       elements.foulThreshold.value = "6";
       elements.extraTimeMinutes.value = "5";
+      elements.fullTimeBreakMinutes.value = "5";
+      elements.extraTimeBreakMinutes.value = "2";
+      elements.psoRounds.value = "5";
 
       document.querySelector(
         'input[name="first-kickoff"][value="home"]'
@@ -1941,7 +2422,7 @@ function initialiseEventListeners() {
       });
 
       $(`#${side}-red-${number}-goal`).addEventListener("click", () => {
-        endReductionForOpponentGoal(side, index);
+        openOpponentGoalDialog(side, index);
       });
 
       $(`#${side}-red-${number}-clear-button`).addEventListener("click", () => {
@@ -1950,59 +2431,68 @@ function initialiseEventListeners() {
     });
   });
 
-  elements.goalConfirm.addEventListener("click", () => {
-    const side = elements.goalConfirm.dataset.side;
-    if (!side) return;
-
-    const penalty = elements.goalPenalty.checked;
-    const tenMetre = elements.goalTenMetre.checked;
-
-    if (penalty && tenMetre) {
-      showAlert(
-        "Choose one goal type",
-        "A goal cannot be both a penalty goal and a 10m free-kick goal. Select one, or leave both unchecked for open play."
-      );
-      return;
-    }
-
-    recordGoal(side, {
-      scorerNumber: elements.goalScorerNumber.value.trim(),
-      penalty,
-      tenMetre,
-      note: elements.goalNote.value.trim()
-    });
-
-    elements.goalDialog.close("confirm");
+  elements.goalConfirm.addEventListener("click", (event) => {
+    event.preventDefault();
+    confirmGoalDialog();
   });
 
-  elements.yellowConfirm.addEventListener("click", () => {
+  elements.yellowConfirm.addEventListener("click", (event) => {
+    event.preventDefault();
+
     const side = elements.yellowConfirm.dataset.side;
-    const playerNumber = elements.yellowPlayerNumber.value.trim();
+    const player = elements.yellowPlayerNumber.value.trim();
 
-    if (!side) return;
-
-    if (!playerNumber) {
-      showAlert(
-        "Player number required",
-        "Enter the player’s number before recording a yellow card."
-      );
+    if (!player) {
+      showAlert("Player number required", "Enter the player number or identifier.");
       return;
     }
 
-    recordYellowCard(
-      side,
-      playerNumber,
-      elements.yellowNote.value.trim()
-    );
-
+    recordYellowCard(side, player, elements.yellowNote.value.trim());
     elements.yellowDialog.close("confirm");
   });
 
-  elements.redRecipientType.addEventListener("change", updateRedDialogFields);
+  elements.secondYellowRed.addEventListener("click", () => {
+    const side = elements.secondYellowRed.dataset.side;
+    const player = elements.secondYellowRed.dataset.playerNumber;
 
-  elements.redConfirm.addEventListener("click", () => {
+    elements.secondYellowDialog.close("confirm");
+    openRedDialog(side, 0, {
+      personId: player,
+      recipientType: "player"
+    });
+  });
+
+  elements.redRecipientType.addEventListener("change", updateRedDialogFields);
+  elements.redDogso.addEventListener("change", updateRedDialogFields);
+
+  elements.redConfirm.addEventListener("click", (event) => {
+    event.preventDefault();
     recordRedCardFromDialog();
   });
+
+  elements.opponentGoalAdd.addEventListener("click", () => {
+    if (!pendingOpponentGoal) return;
+
+    const { opponent } = pendingOpponentGoal;
+
+    elements.opponentGoalDialog.close("add");
+    openGoalDialog(opponent, {
+      afterOpponentGoal: true
+    });
+  });
+
+  elements.opponentGoalRecorded.addEventListener("click", () => {
+    elements.opponentGoalDialog.close("recorded");
+    completePendingOpponentGoalReduction();
+  });
+
+  elements.etCoinHome.addEventListener("click", () => chooseExtraTimeKickoff("home"));
+  elements.etCoinAway.addEventListener("click", () => chooseExtraTimeKickoff("away"));
+
+  elements.psoFirstHome.addEventListener("click", () => selectPsoFirstTeam("home"));
+  elements.psoFirstAway.addEventListener("click", () => selectPsoFirstTeam("away"));
+  elements.psoRecordKick.addEventListener("click", recordPsoKick);
+  elements.psoSuddenDeath.addEventListener("click", beginSuddenDeath);
 
   elements.startButton.addEventListener("click", startMatchTimer);
   elements.pauseButton.addEventListener("click", pauseResumeMatchTimer);
@@ -2010,6 +2500,7 @@ function initialiseEventListeners() {
   elements.undoButton.addEventListener("click", undoPreviousStep);
   elements.proceedButton.addEventListener("click", proceed);
   elements.exportButton.addEventListener("click", exportCsv);
+  elements.wakeLockButton.addEventListener("click", toggleWakeLock);
   elements.newMatchButton.addEventListener("click", beginNewMatch);
 
   elements.dialogConfirm.addEventListener("click", () => {
@@ -2030,10 +2521,27 @@ function initialiseEventListeners() {
     }
   });
 
-  document.addEventListener("visibilitychange", () => {
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+
+    const activeDialog = document.querySelector("dialog[open]");
+    if (!activeDialog) return;
+
+    const confirmButton = activeDialog.querySelector(
+      "button[value='confirm'], button[type='submit']:not([value='cancel'])"
+    );
+
+    if (confirmButton) {
+      event.preventDefault();
+      confirmButton.click();
+    }
+  });
+
+  document.addEventListener("visibilitychange", async () => {
     if (!document.hidden && match) {
       syncAllTimers();
       render();
+      await restoreWakeLockIfNeeded();
     }
   });
 
@@ -2055,7 +2563,7 @@ function init() {
 
   match = loadMatch();
 
-  if (match && match.version !== 5) {
+  if (match && match.version !== 6) {
     localStorage.removeItem(STORAGE_KEY);
     match = null;
   }
@@ -2065,6 +2573,7 @@ function init() {
   }
 
   render();
+  updateWakeLockUi();
   registerServiceWorker();
 }
 

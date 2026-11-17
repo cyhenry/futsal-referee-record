@@ -1253,9 +1253,33 @@ function renderTeamHistories(side) {
     const typeMap = {
       openPlay: "Goal",
       penalty: "Penalty",
-      tenMetre: "10m",
-      ownGoal: `OG No. ${goal.scorerNumber || "?"} (${teamName(goal.ownGoalSide)})`
+      tenMetre: "10m"
     };
+
+    let description;
+
+    if (goal.type === "ownGoal") {
+      const ownGoalSide = ["home", "away"].includes(goal.ownGoalSide)
+        ? goal.ownGoalSide
+        : opposite(goal.displaySide);
+
+      description =
+        `OG No. ${goal.scorerNumber || "?"} ` +
+        `(${teamName(ownGoalSide)})`;
+    } else {
+      const scorer = goal.scorerNumber
+        ? ` No. ${goal.scorerNumber}`
+        : "";
+
+      description = `${typeMap[goal.type] || "Goal"}${scorer}`;
+    }
+
+    const time = goal.periodTime ? ` ${goal.periodTime}` : "";
+
+    return {
+      text: `${goal.phase}${time} — ${description}`
+    };
+  });
 
     const scorer = goal.type === "ownGoal"
       ? ""

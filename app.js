@@ -1281,17 +1281,6 @@ function renderTeamHistories(side) {
     };
   });
 
-    const scorer = goal.type === "ownGoal"
-      ? ""
-      : goal.scorerNumber
-        ? ` No. ${goal.scorerNumber}`
-        : "";
-
-    return {
-      text: `${goal.phase} ${goal.periodTime ? `${goal.periodTime} — ` : "— "}${typeMap[goal.type]}${scorer}`
-    };
-  });
-
   renderMiniHistory($(`#${side}-foul-history`), fouls, (foul) => {
     const threshold = match.settings.foulThreshold;
 
